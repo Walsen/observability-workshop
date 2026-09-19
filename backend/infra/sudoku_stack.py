@@ -22,8 +22,11 @@ from typing import Any
 
 import aws_cdk as cdk
 from aws_cdk import aws_apigateway as apigateway
+from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_synthetics as synthetics
 from constructs import Construct
 
 # The Lambda asset root is the repository root — the directory that *contains*
@@ -60,6 +63,48 @@ _ASSET_EXCLUDE = [
 # synth offline and is deliberately a concrete localhost origin, never ``*``.
 ALLOWED_ORIGIN_CONTEXT_KEY = "allowed_origin"
 _DEFAULT_ALLOWED_ORIGIN = "http://localhost:8000"
+
+# Context key an operator sets (``cdk synth -c canary_target_url=...`` or in
+# ``cdk.json``) to point the synthetic canary at the live Amplify site. Like
+# ``allowed_origin`` it is unknown until Amplify Hosting is connected manually,
+# so it is supplied at synth/deploy time rather than hardcoded — and unlike
+# ``allowed_origin`` it has **no default**: the canary (and its alarm) are
+# created *only* when this context is present, so the existing offline synth,
+# which supplies no context, produces the same backend template with no canary
+# (Requirement 11.1).
+CANARY_TARGET_URL_CONTEXT_KEY = "canary_target_url"
+
+# The directory bundled as the canary's browser-script asset. It holds the
+# Node/Puppeteer Synthetics handler ``sudoku_canary.js`` (entry
+# ``sudoku_canary.handler``), created in task 14.1. ``Code.from_asset`` stages a
+# local copy at synth time — no AWS call, no network — so wiring the canary keeps
+# ``cdk synth`` offline.
+_CANARY_ASSET_DIR = _ASSET_ROOT / "backend" / "infra" / "canary"
+
+# The Synthetics runtime the canary runs on: the newest ``syn-nodejs-puppeteer``
+# runtime available in the pinned aws-cdk-lib (2.270.0). A headless-Chromium /
+# Puppeteer runtime is required by the browser script (Requirement 11.5, design
+# "Canary type and browser script"); pinning the newest keeps the workshop on a
+# current, supported Synthetics runtime.
+_CANARY_RUNTIME = synthetics.Runtime.SYNTHETICS_NODEJS_PUPPETEER_13_0
+
+# The canary's schedule: one run every five minutes -> ``rate(5 minutes)``
+# (Requirement 11.2).
+_CANARY_SCHEDULE_RATE = cdk.Duration.minutes(5)
+
+# The environment-variable name the browser script reads its target URL from
+# (``sudoku_canary.js`` -> ``requireTargetUrl`` reads ``process.env.TARGET_URL``).
+# The stack passes the operator-configured ``canary_target_url`` in under this
+# name so nothing is hardcoded in the script.
+_CANARY_TARGET_URL_ENV = "TARGET_URL"
+
+# The success-rate alarm's threshold and evaluation-period count. The canary's
+# ``SuccessPercent`` metric is a percentage; alarming when it is **below 100**
+# means any failed run (a broken New Game or Solve flow) trips the alarm
+# (Requirement 11.7). One evaluation period keeps detection prompt for a demo —
+# a single failed 5-minute run raises the alarm rather than waiting for a second.
+_CANARY_ALARM_THRESHOLD = 100
+_CANARY_ALARM_EVALUATION_PERIODS = 1
 
 # The Python runtime for every handler (Requirement 9.2).
 _LAMBDA_RUNTIME = lambda_.Runtime.PYTHON_3_12
@@ -152,6 +197,12 @@ class SudokuStack(cdk.Stack):
     #: ``API_Endpoint_URL`` output from :attr:`api.url`.
     api: apigateway.RestApi
 
+    #: The synthetic browser canary, or ``None`` when no ``canary_target_url``
+    #: context was supplied. Created only when the operator provides the live
+    #: site URL (task 14.2, Requirement 11.1), so the offline synth without that
+    #: context leaves this ``None`` and adds no canary/alarm to the template.
+    canary: synthetics.Canary | None
+
     def __init__(
         self, scope: Construct, construct_id: str, **kwargs: Any
     ) -> None:
@@ -162,6 +213,14 @@ class SudokuStack(cdk.Stack):
         self.api = self._create_api()
         self._grant_table_access()
         self._emit_api_url_output()
+        # The canary and its alarm are created *only* when an operator supplies
+        # the live target URL as context. Absent it, the stack synthesizes with
+        # neither — keeping the existing offline backend template unchanged
+        # (Requirement 11.1). When present, ``_create_canary`` builds the canary,
+        # its auto-provisioned artifacts bucket + least-privilege role, and the
+        # ``SuccessPercent`` alarm.
+        target_url = self._canary_target_url()
+        self.canary = self._create_canary(target_url) if target_url else None
 
     def _create_games_table(self) -> dynamodb.Table:
         """Create the ``Games_Table`` keyed by ``gameId`` (PK) / ``playerId`` (SK).
@@ -498,3 +557,153 @@ class SudokuStack(cdk.Stack):
         if isinstance(origin, str) and origin.strip():
             return origin.strip()
         return _DEFAULT_ALLOWED_ORIGIN
+
+    def _canary_target_url(self) -> str | None:
+        """Return the canary's target URL from context, or ``None`` when unset.
+
+        Reads the ``canary_target_url`` CDK context value (set with
+        ``cdk synth -c canary_target_url=https://main.<app-id>.amplifyapp.com`` or
+        in ``cdk.json``), which the operator sets to the live Amplify origin once
+        Amplify Hosting is connected manually in the console. This mirrors
+        :meth:`_allowed_origin`'s context read, with one deliberate difference:
+        there is **no default**. When the context is absent (or blank) this
+        returns ``None``, and :meth:`__init__` then creates neither the canary nor
+        the alarm — so the existing offline synth, which supplies no context,
+        produces the same backend template as before (Requirement 11.1). A blank
+        value is treated as absent so a stray ``-c canary_target_url=`` does not
+        create a canary aimed at nowhere.
+        """
+        target = self.node.try_get_context(CANARY_TARGET_URL_CONTEXT_KEY)
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+        return None
+
+    def _create_canary(self, target_url: str) -> synthetics.Canary:
+        """Create the synthetic browser canary and its ``SuccessPercent`` alarm.
+
+        Called only when :meth:`_canary_target_url` returned a URL, so reaching
+        here means the operator asked for the canary (Requirement 11.1).
+
+        The canary is the **stable** ``aws_cdk.aws_synthetics`` L2 ``Canary`` that
+        ships in the pinned ``aws-cdk-lib`` (2.270.0). The alpha module
+        ``aws_cdk.aws_synthetics_alpha`` is **intentionally not used** and not
+        added as a dependency — the stable module provides both the L2 ``Canary``
+        and the L1 ``CfnCanary``, so no alpha package is needed (design "CDK
+        construct: stable aws_synthetics, alpha module intentionally avoided").
+
+        The L2 ``Canary`` is configured with:
+
+        - **runtime** :data:`_CANARY_RUNTIME` — the newest ``syn-nodejs-puppeteer``
+          runtime in the pinned lib, a headless-Chromium/Puppeteer runtime the
+          browser script needs (Requirement 11.5).
+        - **test** ``Test.custom`` over :data:`_CANARY_ASSET_DIR` with handler
+          ``sudoku_canary.handler`` — the Node asset from task 14.1.
+          ``Code.from_asset`` stages a local copy at synth time (no AWS call),
+          keeping synth offline.
+        - **schedule** ``Schedule.rate(rate(5 minutes))`` (Requirement 11.2).
+        - **active tracing** ``active_tracing=True`` — X-Ray on the canary runs,
+          so each scheduled run joins the browser->API->Lambda->DynamoDB trace
+          (Requirement 11.5).
+        - **environment variables** the operator-supplied ``target_url`` passed in
+          as ``TARGET_URL`` (:data:`_CANARY_TARGET_URL_ENV`), which the script
+          reads — so no URL is hardcoded in the asset.
+        - **provisioned_resource_cleanup** ``True`` — on ``cdk destroy`` the L2
+          construct removes the underlying canary Lambda functions and layers
+          too, matching the demo's throwaway, ``DESTROY``-everything posture (cf.
+          the table's removal policy) rather than leaving orphaned functions
+          behind. This is the non-deprecated replacement for the older
+          ``cleanup=Cleanup.LAMBDA`` kwarg (deprecated in aws-cdk-lib 2.270.0 in
+          favour of ``provisioned_resource_cleanup``); the boolean ``True`` is
+          the equivalent of the old ``Cleanup.LAMBDA``.
+
+        The L2 construct **auto-provisions the artifacts S3 bucket and a
+        least-privilege execution role** scoped to running the script, writing run
+        artifacts, publishing CloudWatch metrics, and writing logs — no blanket
+        bucket or account access (Requirements 11.6, 11.8). Those are deliberately
+        not hand-rolled here. The one permission that role omits even under active
+        tracing is X-Ray write, so :meth:`_grant_canary_xray_write` adds exactly
+        that (``xray:PutTraceSegments`` / ``PutTelemetryRecords``) and nothing
+        more — without it every run fails ``AccessDeniedException`` before
+        producing a result.
+        """
+        canary = synthetics.Canary(
+            self,
+            "SudokuCanary",
+            runtime=_CANARY_RUNTIME,
+            test=synthetics.Test.custom(
+                code=synthetics.Code.from_asset(str(_CANARY_ASSET_DIR)),
+                handler="sudoku_canary.handler",
+            ),
+            schedule=synthetics.Schedule.rate(_CANARY_SCHEDULE_RATE),
+            active_tracing=True,
+            environment_variables={_CANARY_TARGET_URL_ENV: target_url},
+            provisioned_resource_cleanup=True,
+        )
+        self._grant_canary_xray_write(canary)
+        self._create_canary_alarm(canary)
+        return canary
+
+    def _grant_canary_xray_write(self, canary: synthetics.Canary) -> None:
+        """Grant the canary's execution role permission to publish X-Ray segments.
+
+        With ``active_tracing=True`` the Synthetics runtime publishes an X-Ray
+        segment for every run so the run joins the browser -> API -> Lambda ->
+        DynamoDB trace (Requirement 11.5). But the L2 ``Canary``'s
+        auto-provisioned role only covers running the script, writing artifacts
+        to S3, publishing the CloudWatch metrics, and writing logs — it does
+        **not** add X-Ray write, even when active tracing is on (a gap in the
+        pinned aws-cdk-lib's Synthetics L2). Without this grant the runtime's
+        ``xray:PutTraceSegments`` call is denied and the whole run fails with
+        ``AccessDeniedException`` ("No test result returned"), so the grant is
+        required for the canary to run green at all, not merely to emit traces.
+
+        The two actions mirror exactly what CDK attaches to the tracing-enabled
+        Lambdas (``AWSXRayDaemonWriteAccess``): ``xray:PutTraceSegments`` and
+        ``xray:PutTelemetryRecords``. Neither X-Ray write action supports
+        resource-level scoping, so ``resources=["*"]`` is the least privilege the
+        actions allow — the same shape the managed X-Ray write policy uses. This
+        keeps the role's other permissions untouched and adds only what active
+        tracing needs.
+        """
+        canary.role.add_to_principal_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                ],
+                resources=["*"],
+            )
+        )
+
+    def _create_canary_alarm(self, canary: synthetics.Canary) -> cloudwatch.Alarm:
+        """Alarm when the canary's success rate drops below 100% (Requirement 11.7).
+
+        Built on the canary's ``SuccessPercent`` metric via the L2's
+        :meth:`~aws_cdk.aws_synthetics.Canary.metric_success_percent` (equivalently
+        a ``cloudwatch.Metric`` in the ``CloudWatchSynthetics`` namespace,
+        dimension ``CanaryName``). ``SuccessPercent`` is a percentage, so a
+        threshold of :data:`_CANARY_ALARM_THRESHOLD` (100) with
+        ``LESS_THAN_THRESHOLD`` trips on *any* failed run — a broken New Game or
+        Solve flow surfaces automatically rather than silently.
+
+        ``evaluation_periods`` is :data:`_CANARY_ALARM_EVALUATION_PERIODS` (1) so a
+        single failed 5-minute run raises the alarm — prompt detection for a demo.
+        ``treat_missing_data`` is ``BREACHING``: for a health monitor, a canary
+        that stops reporting (its runs are not producing a ``SuccessPercent``
+        datapoint at all) is itself a problem that should trip the alarm, not be
+        masked as "no news is good news".
+        """
+        return cloudwatch.Alarm(
+            self,
+            "SudokuCanarySuccessAlarm",
+            metric=canary.metric_success_percent(),
+            threshold=_CANARY_ALARM_THRESHOLD,
+            comparison_operator=cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+            evaluation_periods=_CANARY_ALARM_EVALUATION_PERIODS,
+            treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
+            alarm_description=(
+                "Sudoku synthetic canary success rate dropped below 100% — the "
+                "New Game or Solve flow is failing against the live site."
+            ),
+        )

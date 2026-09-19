@@ -241,6 +241,27 @@ HTML/CSS/JS (frontend), per `design.md`.
     - Write a script/test that drives a request through the deployed API and inspects the resulting trace with `aws xray get-trace-summaries` / `aws xray batch-get-traces`, asserting a single trace spans Frontend → API → Lambda → DynamoDB with the four solver subsegments present
     - _Requirements: 1.2, 1.4, 10.4, 10.5, 10.6; Design: End-to-End Trace Propagation, Deployment Handoff_
 
+- [ ] 14. Add synthetic canary monitoring and alerting
+  - [ ] 14.1 Write the Puppeteer canary browser script asset
+    - In `backend/infra/canary/sudoku_canary.js`, implement a Node/Puppeteer Synthetics handler (`exports.handler`) following the Synthetics handler contract, using `Synthetics.executeStep` for each named step: load the `canary_target_url` (read from an environment variable), click "New Game" and assert a 9×9 board (81 cells) renders, click "Solve" and assert the board reaches the solved state; rely on Synthetics automatic step/failure screenshots
+    - This is a Node asset invoked by the Synthetics runtime, not imported by Python — it does NOT go in `pyproject.toml`; it is exercised live, not in the offline pytest suite
+    - _Requirements: 11.3, 11.4, 11.6; Design: Synthetic Canary Monitoring (Canary type and browser script)_
+
+  - [ ] 14.2 Add the Canary, artifacts bucket, active tracing, schedule, and alarm to the stack
+    - In `infra/sudoku_stack.py`, read `self.node.try_get_context("canary_target_url")`; WHEN present, create a `Canary` (stable `aws_cdk.aws_synthetics` L2 — alpha module intentionally not used) with a `syn-nodejs-puppeteer` runtime, `Code.from_asset("backend/infra/canary")` + handler `sudoku_canary.handler`, `Schedule.rate(Duration.minutes(5))`, `active_tracing=True`, and the target URL passed via script environment; the L2 construct provisions the artifacts bucket and least-privilege execution role
+    - Add a `cloudwatch.Alarm` on the canary `SuccessPercent` metric (`metric_success_percent()`), threshold below 100 over N evaluation periods (`LESS_THAN_THRESHOLD`); WHEN the context value is absent, synthesize without the canary/alarm so the existing offline backend template is unchanged
+    - _Requirements: 11.1, 11.2, 11.5, 11.6, 11.7, 11.8; Design: Synthetic Canary Monitoring (CDK construct; Operator-configured target URL; IAM)_
+
+  - [ ]* 14.3 Write offline CDK synth template assertions for the canary and alarm
+    - Using `aws_cdk.assertions.Template` with the stack synthesized **with** `canary_target_url` context supplied (no credentials, no network): assert an `AWS::Synthetics::Canary` with a `syn-nodejs-puppeteer` runtime, `rate(5 minutes)` schedule, active tracing enabled, and an artifacts location; and an `AWS::CloudWatch::Alarm` on the canary `SuccessPercent` metric with the configured threshold/comparison
+    - Also assert that synthesizing **without** the context omits the canary (Requirement 11.1)
+    - _Requirements: 11.1, 11.2, 11.5, 11.6, 11.7; Design: Testing Strategy (Canary / alarm template assertions)_
+
+  - [ ] 14.4 Deploy and verify the live canary (outside the offline suite)
+    - This task requires AWS credentials and a live deployment; it is explicitly NOT part of the offline `just test` suite (mirrors task 13)
+    - Deploy with `cdk deploy -c canary_target_url=<amplify-url> -c allowed_origin=<amplify-url>`; confirm the canary runs green on its 5-minute schedule and produces an X-Ray trace spanning Frontend → API → Lambda → DynamoDB, and confirm the CloudWatch alarm on `SuccessPercent` exists
+    - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.7; Design: Synthetic Canary Monitoring (IAM and the offline guarantee)_
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation sub-tasks are never optional.
@@ -248,6 +269,7 @@ HTML/CSS/JS (frontend), per `design.md`.
 - The offline suite (tasks 2–12 tests) runs with no AWS credentials and no network beyond localhost; CDK synth resolves nothing from an account.
 - Property tests run a minimum of 100 iterations and each references its design property number.
 - Task 13 (end-to-end trace verification) is deliberately outside the offline suite because it depends on a live deployment and the manual Amplify handoff.
+- Task 14 adds the CloudWatch Synthetics canary and alarm: 14.1–14.3 (script asset, CDK wiring, and offline template assertions) are offline; 14.4 (live deploy + canary/trace/alarm verification) is a billable deploy-time step outside the offline suite. The canary is created only when the `canary_target_url` context is supplied, so the existing offline synth without it is unchanged.
 
 ## Task Dependency Graph
 
@@ -267,7 +289,10 @@ HTML/CSS/JS (frontend), per `design.md`.
     { "id": 10, "tasks": ["10.4"] },
     { "id": 11, "tasks": ["10.5"] },
     { "id": 12, "tasks": ["10.6", "12.1", "12.2", "12.3"] },
-    { "id": 13, "tasks": ["13"] }
+    { "id": 13, "tasks": ["13"] },
+    { "id": 14, "tasks": ["14.1"] },
+    { "id": 15, "tasks": ["14.2"] },
+    { "id": 16, "tasks": ["14.3", "14.4"] }
   ]
 }
 ```

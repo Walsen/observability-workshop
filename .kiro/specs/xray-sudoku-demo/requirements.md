@@ -26,6 +26,10 @@ The game is fully playable and supports multiple concurrent users through a clie
 - **CDK_App**: The AWS CDK application, written in Python, that defines the backend infrastructure (API Gateway, Lambda functions, DynamoDB table).
 - **API_Endpoint_URL**: The invoke URL of the API, emitted as a CDK stack output after deployment.
 - **Move**: A single value placement by a Player into one cell of the Sudoku board.
+- **Canary**: An AWS CloudWatch Synthetics browser canary that, on a schedule, drives the deployed Frontend with a headless browser to exercise the New Game and Solve flows as a synthetic Player.
+- **Canary_Target_URL**: The live Frontend URL (the Amplify_Hosting domain) that the Canary loads, supplied by the operator as a CDK context value (`canary_target_url`).
+- **Alarm**: An Amazon CloudWatch alarm that transitions to the `ALARM` state when the Canary's success rate falls below a configured threshold.
+- **Success_Percent**: The CloudWatch Synthetics `SuccessPercent` metric, the percentage of Canary runs that completed successfully over a period.
 
 ## Requirements
 
@@ -140,3 +144,18 @@ The game is fully playable and supports multiple concurrent users through a clie
 4. WHERE the operator provides the API_Endpoint_URL as an Amplify configuration value, THE Frontend SHALL send API requests to that configured URL.
 5. WHEN the operator pushes the `main` Git branch, THE Amplify_Hosting SHALL deploy the Frontend to the production URL.
 6. WHEN the operator pushes a `feature/*` Git branch, THE Amplify_Hosting SHALL deploy the Frontend to a preview URL.
+
+### Requirement 11: Synthetic canary monitoring and alerting
+
+**User Story:** As an operator, I want a synthetic browser canary that continuously exercises the deployed game and alarms on failure, so that a broken New Game or Solve flow surfaces automatically and each scheduled run produces an end-to-end X-Ray trace.
+
+#### Acceptance Criteria
+
+1. WHERE the operator provides the Canary_Target_URL as the `canary_target_url` CDK context value, THE CDK_App SHALL create the Canary; and WHERE the `canary_target_url` context value is absent, THE CDK_App SHALL synthesize the stack without the Canary.
+2. WHILE the Canary is deployed, THE Canary SHALL run on a schedule of once every 5 minutes.
+3. WHEN the Canary runs, THE Canary SHALL load the Canary_Target_URL in a headless browser, activate the New Game action, and assert that a 9×9 board renders.
+4. WHEN the Canary has a rendered board, THE Canary SHALL activate the Solve action and assert that the board reaches the solved state.
+5. WHEN the Canary runs, THE Canary SHALL have AWS X-Ray active tracing enabled so that the run produces a Trace spanning the Frontend, API, Lambda_Function, and Games_Table.
+6. WHEN the Canary runs, THE Canary SHALL write run artifacts, including step screenshots, to a CloudWatch Synthetics artifacts store.
+7. IF the Canary Success_Percent falls below the configured threshold over the configured number of evaluation periods, THEN THE Alarm SHALL transition to the `ALARM` state.
+8. THE CDK_App SHALL grant the Canary only the permissions required to run the browser script, write artifacts, publish metrics, and write trace data to AWS X-Ray.

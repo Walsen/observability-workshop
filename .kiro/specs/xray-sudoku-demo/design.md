@@ -333,6 +333,118 @@ neither read nor mutate another player's game.
   `xray:PutTraceSegments` / `xray:PutTelemetryRecords` for trace writes. No
   Lambda receives blanket table or account access.
 
+## Synthetic Canary Monitoring (CloudWatch Synthetics)
+
+This slice adds a **CloudWatch Synthetics browser canary** that behaves as a
+synthetic Player: on a schedule it drives the *live* Amplify-hosted Frontend
+with a headless browser, and because that browser makes the same API calls a
+real user's browser makes (now that CORS is locked to the Amplify origin), each
+scheduled run becomes a real end-to-end request that is traced through
+CloudFront/Amplify → API Gateway → Lambda → DynamoDB. A CloudWatch **alarm** on
+the canary's success rate makes a broken New Game or Solve flow surface
+automatically (Requirement 11).
+
+The canary complements the existing X-Ray story rather than changing it: the
+frontend, API, Lambdas, and table are unchanged; the canary is simply a
+scheduled, monitored synthetic user in front of them.
+
+### Canary type and browser script
+
+The canary is a **UI (browser) canary** on the Synthetics
+`syn-nodejs-puppeteer` runtime — a headless Chromium driven by Puppeteer. Its
+handler is a small **Node.js** script following the Synthetics handler contract
+(`exports.handler`), using the `Synthetics` library's `executeStep` to record
+each step as a named, screenshotted step (Synthetics captures screenshots on
+each step and on failure automatically) (Requirement 11.6). The script steps
+are:
+
+1. **load-site** — navigate to the `Canary_Target_URL`.
+2. **new-game** — click the "New Game" control and wait for the board.
+3. **assert-board** — assert a 9×9 board (81 cells) has rendered.
+4. **solve** — click the "Solve" control.
+5. **assert-solved** — assert the board reaches the solved/completed state.
+
+Any failed assertion fails the step, which fails the run and lowers
+`SuccessPercent` (Requirement 11.3, 11.4).
+
+Because this script is **Node, not Python**, and is *invoked* by the Synthetics
+runtime rather than *imported* by any Python code, it is **not** a `uv`
+dependency and does not appear in `pyproject.toml` (dev-environment steering:
+import-vs-invoke). It is an **asset file** bundled by CDK. It lives at:
+
+```
+backend/infra/canary/
+└── sudoku_canary.js        # Node/Puppeteer Synthetics handler (asset, not imported)
+```
+
+### CDK construct: stable aws_synthetics, alpha module intentionally avoided
+
+The canary is defined with the **stable** `aws_cdk.aws_synthetics` module that
+ships in the already-pinned `aws-cdk-lib` (2.270.0), using the **L2 `Canary`
+construct**. The alpha module `aws_cdk.aws_synthetics_alpha` is **intentionally
+not used** and is **not** added as a dependency — the stable module provides
+both the L2 `Canary` and the L1 `CfnCanary`, so no alpha package is required.
+The L2 `Canary` cleanly covers everything this slice needs:
+
+- **runtime** — `Runtime.SYNTHETICS_NODEJS_PUPPETEER_*` (a
+  `syn-nodejs-puppeteer` runtime).
+- **schedule** — `Schedule.rate(Duration.minutes(5))` → `rate(5 minutes)`
+  (Requirement 11.2).
+- **test/code** — `Code.from_asset(...)` pointing at `backend/infra/canary/`
+  with the handler `sudoku_canary.handler`.
+- **active tracing** — `active_tracing=True`, enabling X-Ray on the canary runs
+  (Requirement 11.5).
+- **artifacts bucket** — the L2 construct provisions the artifacts S3 bucket and
+  the canary's execution role for you (Requirement 11.6); the target URL is
+  passed to the script via an environment variable.
+
+If a future need exceeds the L2 surface, the fallback is the L1
+`CfnCanary` from the *same stable module* — still no alpha package.
+
+The **CloudWatch alarm** uses the stable `aws_cdk.aws_cloudwatch` module. The
+alarm is built on the canary's `SuccessPercent` metric — obtained from the L2
+canary's `metric_success_percent()` (equivalently a `cloudwatch.Metric` in the
+`CloudWatchSynthetics` namespace, dimension `CanaryName`) — and alarms when
+success drops below the threshold (e.g. `threshold=100`,
+`comparison=LESS_THAN_THRESHOLD`, over N evaluation periods) (Requirement 11.7).
+
+### Operator-configured target URL and conditional creation
+
+The canary needs the live site URL, supplied the **same operator-configured way
+the stack already handles `allowed_origin`**: as a **CDK context value**
+`canary_target_url` (e.g. `-c canary_target_url=https://main.<id>.amplifyapp.com`),
+documented so no URL is hardcoded and `cdk synth` stays offline. The stack reads
+it with `self.node.try_get_context("canary_target_url")`:
+
+- **When provided** — the stack creates the canary (with the URL passed into the
+  script's environment), the artifacts bucket, and the alarm.
+- **When absent** — the stack synthesizes **without** the canary, so the
+  existing offline synth (which supplies no context) continues to resolve
+  nothing from an account and produce the same backend template (Requirement
+  11.1).
+
+The offline template-assertion test synthesizes **with** the
+`canary_target_url` context supplied, so it can assert the canary and alarm
+resources exist.
+
+### IAM (least privilege) and the offline guarantee
+
+Consistent with the existing least-privilege framing: the canary runs under its
+**own execution role** created by the L2 construct, scoped to running the
+browser script, writing run artifacts to its artifacts bucket, publishing
+CloudWatch metrics, and writing trace data to X-Ray — no blanket bucket or
+account access (Requirement 11.8). This mirrors the per-Lambda least-privilege
+model already used for the four handlers.
+
+The canary/alarm resources are **synthesized and asserted entirely offline**
+(no credentials, no network, `cdk synth` resolves nothing from an account),
+exactly like the existing infra assertions — the browser script is a local asset
+and the target URL comes from context, not an account lookup. The **live canary
+is a billable, deploy-time resource** (scheduled canary runs, its artifacts S3
+bucket, and the alarm), so it is **not** part of `just test`; it deploys with
+the stack when `canary_target_url` is supplied to `cdk deploy` alongside the
+existing `allowed_origin` context.
+
 ## Toolchain and Dependencies
 
 ### devbox packages (exact-version placeholders)
@@ -449,10 +561,23 @@ tests.
   CORS, a `CfnOutput` for the URL, region us-east-1, and IAM policies scoped to
   the table plus `xray:PutTraceSegments`.
 
+- **Canary / alarm (SMOKE / template assertions):** synthesizing the stack
+  **with** the `canary_target_url` context supplied (still no credentials, no
+  network), `aws_cdk.assertions.Template` asserts an `AWS::Synthetics::Canary`
+  exists with a `syn-nodejs-puppeteer` runtime, a `rate(5 minutes)` schedule,
+  active tracing enabled, and an artifacts location, plus an
+  `AWS::CloudWatch::Alarm` on the canary `SuccessPercent` metric with the
+  configured threshold/comparison. Synthesizing **without** the context asserts
+  the canary is absent (Requirement 11.1). No property test applies to the
+  canary — it is deploy-time infrastructure, not input-varying logic.
+
 Property tests run a minimum of 100 iterations and each references its design
 property below. End-to-end trace verification (Requirements 1.2/1.4) is an
 integration concern performed against the deployed stack (a handful of example
-traces via `aws xray`), explicitly outside the offline suite.
+traces via `aws xray`), explicitly outside the offline suite. Live verification
+that the deployed canary runs green and produces a trace (Requirement 11) is
+likewise outside the offline suite, since it depends on a billable live
+deployment.
 
 ## Correctness Properties
 
