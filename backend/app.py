@@ -33,10 +33,27 @@ from backend.infra.sudoku_stack import SudokuStack
 _STACK_ID = "XraySudokuDemoStack"
 _REGION = "us-east-1"
 
+# Cost-allocation tags applied once at the app level. CDK propagates these to
+# every taggable resource in the stack (the four Lambdas, the Games_Table, the
+# API, the canary + its artifacts bucket, and the IAM roles), so spend can be
+# attributed to this demo. Defined as a module constant so a test can import and
+# assert them. Note: the `Project` tag must be activated as a cost-allocation tag
+# in the Billing console (management/payer account) before Cost Explorer can
+# group or filter by it, with ~24h of backfill lag (Requirement 12.1; design
+# "Cost Attribution and Reporting").
+_COST_ALLOCATION_TAGS: dict[str, str] = {
+    "Project": "xray-sudoku-demo",
+    "ManagedBy": "cdk",
+}
+
 
 def main() -> None:
     """Build the CDK app, add the stack pinned to us-east-1, and synthesize."""
     app = cdk.App()
+    # Apply app-level cost-allocation tags before synth so CDK propagates them to
+    # every taggable resource in the stack.
+    for tag_key, tag_value in _COST_ALLOCATION_TAGS.items():
+        cdk.Tags.of(app).add(tag_key, tag_value)
     # Region-only env pins us-east-1 (Requirement 9.4) without naming an account,
     # so synth performs no account context lookup and stays offline.
     SudokuStack(app, _STACK_ID, env=cdk.Environment(region=_REGION))

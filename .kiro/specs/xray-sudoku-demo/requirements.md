@@ -30,6 +30,9 @@ The game is fully playable and supports multiple concurrent users through a clie
 - **Canary_Target_URL**: The live Frontend URL (the Amplify_Hosting domain) that the Canary loads, supplied by the operator as a CDK context value (`canary_target_url`).
 - **Alarm**: An Amazon CloudWatch alarm that transitions to the `ALARM` state when the Canary's success rate falls below a configured threshold.
 - **Success_Percent**: The CloudWatch Synthetics `SuccessPercent` metric, the percentage of Canary runs that completed successfully over a period.
+- **Cost_Allocation_Tag**: An AWS resource tag that, once activated in the AWS Billing console of the management (payer) account, becomes a dimension by which AWS Cost Explorer can group and filter cost and usage.
+- **Project_Tag**: The specific Cost_Allocation_Tag with key `Project` and value `xray-sudoku-demo` applied to every taggable resource in the CDK_App, used to attribute AWS spend to the X_Ray_Sudoku_Demo.
+- **Cost_Report**: The read-only report of the X_Ray_Sudoku_Demo's AWS cost, produced by the `get-cost` skill from the AWS Cost Explorer `getCostAndUsage` operation via the AWS Billing & Cost Management MCP server.
 
 ## Requirements
 
@@ -159,3 +162,18 @@ The game is fully playable and supports multiple concurrent users through a clie
 6. WHEN the Canary runs, THE Canary SHALL write run artifacts, including step screenshots, to a CloudWatch Synthetics artifacts store.
 7. IF the Canary Success_Percent falls below the configured threshold over the configured number of evaluation periods, THEN THE Alarm SHALL transition to the `ALARM` state.
 8. THE CDK_App SHALL grant the Canary only the permissions required to run the browser script, write artifacts, publish metrics, and write trace data to AWS X-Ray.
+
+### Requirement 12: Cost attribution and reporting
+
+**User Story:** As an operator, I want the demo's resources tagged for cost allocation and a way to report the solution's AWS spend, so that I can attribute and track what the X-Ray Sudoku Demo costs to run.
+
+#### Acceptance Criteria
+
+1. THE CDK_App SHALL apply the Cost_Allocation_Tags `Project` = `xray-sudoku-demo` and `ManagedBy` = `cdk` at the app level so that CDK propagates them to every taggable resource it defines (the Lambda_Functions, the Games_Table, the API, the Canary and its artifacts store, and the associated IAM roles).
+2. WHERE the Project_Tag is activated as a cost-allocation tag in the AWS Billing console, THE Cost_Report SHALL attribute AWS cost to the X_Ray_Sudoku_Demo by filtering on the Project_Tag.
+3. WHEN the operator requests the Cost_Report without specifying a time window, THE Cost_Report SHALL cover the current month-to-date period.
+4. WHERE the operator specifies a time window, THE Cost_Report SHALL cover the specified window, supporting the last seven days and an explicit start-and-end date range.
+5. WHEN the Cost_Report is produced, THE Cost_Report SHALL exclude `Credit` and `Refund` record types by default.
+6. IF the Project_Tag is not yet active as a cost-allocation tag, THEN THE Cost_Report SHALL fall back to reporting cost grouped by AWS service (Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify, and Data Transfer).
+7. WHERE the operator requests a month-end projection, THE Cost_Report SHALL include a forecasted cost for the current month.
+8. THE Cost_Report SHALL be read-only and SHALL introduce no billable infrastructure beyond the negligible cost of the Cost Explorer API calls it makes.

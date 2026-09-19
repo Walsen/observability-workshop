@@ -655,3 +655,116 @@ leaves the other pair's item unchanged, and a load for one pair never returns
 the other's game.
 
 **Validates: Requirements 7.3**
+
+## Cost Attribution and Reporting
+
+This slice makes the demo's AWS spend attributable and reportable. It adds **no
+runtime behavior and no billable infrastructure**: it tags the resources the
+stack already defines so their cost can be isolated, and it adds a read-only
+`get-cost` skill that queries Cost Explorer through the AWS Billing & Cost
+Management MCP server. It complements the existing X-Ray/observability story —
+tracing shows *where time goes* in a request; this shows *what the stack costs*
+to run (Requirement 12).
+
+### App-level cost-allocation tagging
+
+Rather than tag each construct individually, the tags are applied once at the
+**app level** in `backend/app.py`, and CDK's tag aspect propagates them down to
+every taggable resource in the tree (the four Lambda functions, the DynamoDB
+table, the REST API, the Synthetics canary and its artifacts bucket, and the
+IAM roles):
+
+```python
+app = cdk.App()
+cdk.Tags.of(app).add("Project", "xray-sudoku-demo")
+cdk.Tags.of(app).add("ManagedBy", "cdk")
+SudokuStack(app, _STACK_ID, env=cdk.Environment(region=_REGION))
+app.synth()
+```
+
+Applying to the `App` (rather than the `Stack`) keeps the tags in one place and
+ensures anything the stack adds later inherits them. The tag keys are `Project`
+(value `xray-sudoku-demo`, the **Project_Tag**) and `ManagedBy` (value `cdk`)
+(Requirement 12.1).
+
+Two caveats matter for interpreting the numbers, and the skill documents both:
+
+- **Not every line item carries the tag in Cost Explorer.** Some usage —
+  notably certain **Data Transfer** and some **CloudWatch/X-Ray** line items —
+  is not associated with a taggable resource, so a tag-filtered total can
+  slightly **under-count** true spend. The service-scoped fallback (below) and
+  the tag-scoped view are therefore **complementary**, not redundant.
+- **Tag-based cost requires manual activation and a backfill delay** (see the
+  prerequisite below).
+
+### Two reporting modes
+
+The `get-cost` skill reports cost two ways, and states which mode produced the
+numbers:
+
+1. **Tag-primary (precise, per-stack) — available after activation.** Filters
+   `getCostAndUsage` on the Project_Tag (`Project = xray-sudoku-demo`). This is
+   the precise cost of *this* solution's resources. It is only meaningful once
+   the operator has activated the `Project` cost-allocation tag in Billing and
+   ~24h of backfill has elapsed (Requirement 12.2).
+2. **Service-fallback (immediate, account-wide for those services).** Groups
+   `getCostAndUsage` by `SERVICE`, scoped to the services this stack uses —
+   Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify,
+   and Data Transfer. This works **immediately** with no activation, but for a
+   shared account it reflects account-wide spend on those services, not just
+   this stack's (Requirement 12.6). The skill uses this when the tag is not yet
+   active, and it is always a useful sanity check against the tag total.
+
+### The `get-cost` skill
+
+The skill lives at `.kiro/skills/get-cost/SKILL.md` and uses the
+**`awslabs.billing-cost-management` MCP server's `cost_explorer` tool** with the
+`getCostAndUsage` operation — **not** the AWS CLI, and **not** the CloudWatch
+Application Signals MCP server. Its behavior:
+
+- **Time window** — defaults to **month-to-date** (Requirement 12.3); also
+  accepts **last 7 days** and an **explicit start/end range** (Requirement
+  12.4). It chooses `DAILY` granularity for these short windows.
+- **Metric** — `UnblendedCost`.
+- **Record types** — excludes `Credit` and `Refund` by default via the
+  `getCostAndUsage` filter (Requirement 12.5).
+- **Grouping / filter** — tag-primary mode filters on the `Project` tag;
+  service-fallback mode groups by `SERVICE` over the stack's services
+  (Requirement 12.2, 12.6).
+- **Optional forecast** — when a month-end projection is requested, it also
+  calls `getCostForecast` for the remainder of the current month (Requirement
+  12.7).
+- **Read-only** — it only *reads* cost data; it provisions nothing and its only
+  cost is the negligible per-request Cost Explorer API charge (Requirement
+  12.8).
+
+### Manual prerequisite: activating the Project cost-allocation tag
+
+Tag-based cost attribution is **not automatic**. The operator must, **once**, in
+the **management (payer) account only**:
+
+1. Open the AWS Billing console → **Cost allocation tags**.
+2. Activate the **`Project`** user-defined tag.
+3. Wait **~24 hours** for AWS to backfill the tag onto cost data before the
+   tag-filtered numbers become meaningful.
+
+Until then, the skill's tag-primary mode returns little or nothing, and the
+skill falls back to the service-scoped view (Requirement 12.6). The skill's
+documentation states this prerequisite and the lag explicitly, and notes the
+tag-vs-service views are complementary.
+
+### Testing and the offline guarantee
+
+Only the **CDK tagging** is covered by the offline suite: an
+`aws_cdk.assertions.Template` assertion that a representative taggable resource
+(e.g. the DynamoDB table and/or a Lambda) carries `Tags` including
+`Project = xray-sudoku-demo` in the synthesized template. This resolves nothing
+from an account and needs no credentials, exactly like the existing infra
+assertions. Note that resources render `Tags` differently in CloudFormation
+(a list of `{Key, Value}` vs. a map), so the assertion accommodates the shape of
+the resource it checks.
+
+The **skill itself is not part of `just test`**: it requires the Billing &
+Cost Management MCP server and a real account with billing data, so — like the
+end-to-end trace verification (task 13) and the live canary (task 14.4) — it is
+exercised against an account, not in the offline pytest suite.

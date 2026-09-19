@@ -262,6 +262,30 @@ HTML/CSS/JS (frontend), per `design.md`.
     - Deploy with `cdk deploy -c canary_target_url=<amplify-url> -c allowed_origin=<amplify-url>`; confirm the canary runs green on its 5-minute schedule and produces an X-Ray trace spanning Frontend → API → Lambda → DynamoDB, and confirm the CloudWatch alarm on `SuccessPercent` exists
     - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.7; Design: Synthetic Canary Monitoring (IAM and the offline guarantee)_
 
+- [x] 15. Cost attribution: tag resources and add a cost skill
+  - [x] 15.1 Add app-level cost-allocation tags in backend/app.py
+    - In `backend/app.py`, after constructing the `cdk.App()` and before `app.synth()`, apply `cdk.Tags.of(app).add("Project", "xray-sudoku-demo")` and `cdk.Tags.of(app).add("ManagedBy", "cdk")` so CDK propagates the tags to every taggable resource (the four Lambdas, the Games_Table, the API, the Canary + its artifacts bucket, and the IAM roles)
+    - _Requirements: 12.1; Design: Cost Attribution and Reporting (App-level cost-allocation tagging)_
+
+  - [x]* 15.2 Write offline CDK synth template assertion for the Project tag
+    - Using `aws_cdk.assertions.Template` (no credentials, no network): synthesize the stack and assert a representative taggable resource — e.g. the DynamoDB table and/or a Lambda function — carries `Tags` including `Project` = `xray-sudoku-demo` in the synthesized template; accommodate that resources render `Tags` as a list of `{Key, Value}` or a map depending on the resource type
+    - Offline, no creds — extends the existing `test_infra_synth.py` assertions
+    - _Requirements: 12.1; Design: Cost Attribution and Reporting (Testing and the offline guarantee)_
+
+  - [x] 15.3 Write the get-cost skill
+    - Create `.kiro/skills/get-cost/SKILL.md` describing a read-only cost report built on the `awslabs.billing-cost-management` MCP server's `cost_explorer` tool (`getCostAndUsage`) — NOT the AWS CLI and NOT the CloudWatch Application Signals server
+    - Document both modes: tag-primary (filter on `Project` = `xray-sudoku-demo`, precise per-stack, available only after Billing activation + ~24h) and service-fallback (group by `SERVICE` over Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify, Data Transfer — immediate but account-wide)
+    - Default the window to month-to-date; support last-7-days and explicit start/end ranges; use `UnblendedCost`; exclude `Credit`/`Refund` record types by default; optionally call `getCostForecast` for a month-end projection
+    - Document the manual prerequisite (activate the `Project` cost-allocation tag in Billing, management/payer account only, then ~24h backfill lag) and that tag-filtered and service-filtered views are complementary
+    - Not part of the offline pytest suite (needs the Billing MCP server + a real account)
+    - _Requirements: 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8; Design: Cost Attribution and Reporting (Two reporting modes; The get-cost skill; Manual prerequisite)_
+
+  - [x] 15.4 Deploy the tag change and verify resources carry the tag (outside the offline suite)
+    - This task requires AWS credentials and a live deployment; it is explicitly NOT part of the offline `just test` suite (mirrors tasks 13 and 14.4)
+    - Run `just deploy` / `cdk deploy` with the existing `-c allowed_origin=<amplify-url>` and `-c canary_target_url=<amplify-url>` context so the tags reach the deployed resources; note the operator must then activate the `Project` cost-allocation tag in the Billing console (management/payer account) and allow ~24h before tag-based cost appears
+    - Verify the deployed resources carry the tag, e.g. `aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=xray-sudoku-demo` or by describing the deployed table's tags
+    - _Requirements: 12.1, 12.2; Design: Cost Attribution and Reporting (Manual prerequisite; Testing and the offline guarantee)_
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation sub-tasks are never optional.
@@ -270,6 +294,7 @@ HTML/CSS/JS (frontend), per `design.md`.
 - Property tests run a minimum of 100 iterations and each references its design property number.
 - Task 13 (end-to-end trace verification) is deliberately outside the offline suite because it depends on a live deployment and the manual Amplify handoff.
 - Task 14 adds the CloudWatch Synthetics canary and alarm: 14.1–14.3 (script asset, CDK wiring, and offline template assertions) are offline; 14.4 (live deploy + canary/trace/alarm verification) is a billable deploy-time step outside the offline suite. The canary is created only when the `canary_target_url` context is supplied, so the existing offline synth without it is unchanged.
+- Task 15 adds cost attribution: 15.1 (app-level cost-allocation tags in `backend/app.py`) and 15.2 (offline synth assertion that a taggable resource carries `Project=xray-sudoku-demo`) are offline; 15.3 (the `get-cost` skill using the Billing & Cost Management MCP `cost_explorer` tool) and 15.4 (deploy the tags + verify) are outside the offline pytest suite. Tag-based cost requires a one-time manual activation of the `Project` cost-allocation tag in the Billing console (management/payer account) plus ~24h backfill; until then the skill falls back to a service-scoped view, and the two views are complementary. This slice adds no billable infrastructure beyond negligible Cost Explorer API calls.
 
 ## Task Dependency Graph
 
@@ -292,7 +317,10 @@ HTML/CSS/JS (frontend), per `design.md`.
     { "id": 13, "tasks": ["13"] },
     { "id": 14, "tasks": ["14.1"] },
     { "id": 15, "tasks": ["14.2"] },
-    { "id": 16, "tasks": ["14.3", "14.4"] }
+    { "id": 16, "tasks": ["14.3", "14.4"] },
+    { "id": 17, "tasks": ["15.1", "15.3"] },
+    { "id": 18, "tasks": ["15.2"] },
+    { "id": 19, "tasks": ["15.4"] }
   ]
 }
 ```
