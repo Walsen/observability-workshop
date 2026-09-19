@@ -57,10 +57,10 @@ applications:
       phases:
         preBuild:
           commands:
-            - echo "No preBuild step: static HTML/CSS/JS served as-is."
+            - echo "no preBuild step - static site served as-is"
         build:
           commands:
-            - echo "No build step: publishing static files unchanged."
+            - echo "no build step - publishing static files unchanged"
       artifacts:
         # Amplify runs within appRoot=frontend, so the static files are in the
         # current directory. Publish them all.
