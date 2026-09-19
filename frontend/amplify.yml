@@ -1,5 +1,20 @@
 # amplify.yml — AWS Amplify Hosting build spec for the X-Ray Sudoku frontend.
 #
+# ── Monorepo build spec (applications / appRoot) ─────────────────────────────
+# The Amplify app is registered as a monorepo ("My app is a monorepo" is checked
+# in the console, with the monorepo root directory set to `frontend`). When an
+# app is a monorepo, Amplify REQUIRES the build spec to use the top-level
+# `applications:` array, where each entry carries an `appRoot`. A single-app
+# spec with a top-level `frontend:` key is rejected at build time with:
+#     CustomerError: Monorepo spec provided without "applications" key
+# so the spec below uses `applications:` with one entry.
+#
+# `appRoot: frontend` is relative to the REPO ROOT and must match the monorepo
+# root directory configured in the Amplify console (`frontend`). This file lives
+# at `frontend/amplify.yml`; for a monorepo spec Amplify reads the build spec
+# from the repo root or the app root, so keeping the file here with
+# `appRoot: frontend` is fine (Requirement 10.2).
+#
 # ── No build step ────────────────────────────────────────────────────────────
 # This is a no-build static site: plain HTML, CSS, and JavaScript (index.html,
 # styles.css, config.js, app.js) served exactly as committed. There is no
@@ -8,16 +23,11 @@
 # instead of running a build, then publish the files as-is (Requirements 10.1,
 # 10.3).
 #
-# ── Amplify app root assumption ──────────────────────────────────────────────
-# This file lives at `frontend/amplify.yml`, and the frontend itself lives in the
-# repository's `frontend/` folder (Requirement 10.2). When the operator connects
-# the app in the Amplify console, they set the app's root (monorepo "app root")
-# to `frontend`. With the app root set to `frontend`, Amplify runs this spec from
-# inside `frontend/`, so the static files (index.html, styles.css, config.js,
-# app.js) are in the current directory. `artifacts.baseDirectory: '.'` therefore
-# publishes exactly those files. (If the app root were left at the repo root
-# instead, baseDirectory would need to be `frontend` — set the app root to
-# `frontend` to match this spec.)
+# Amplify runs each application from inside its `appRoot`, so with
+# `appRoot: frontend` the spec executes from within `frontend/` and the static
+# files (index.html, styles.css, config.js, app.js) are in the current
+# directory. `artifacts.baseDirectory: '.'` therefore publishes exactly those
+# files.
 #
 # ── Operator handoff: connecting Amplify and pointing at the API ─────────────
 # Amplify Hosting is connected manually in the console, NOT via CDK. Branch-based
@@ -33,20 +43,22 @@
 #      Amplify redeploys. (See config.js and design.md "Deployment Handoff".)
 
 version: 1
-frontend:
-  phases:
-    preBuild:
-      commands:
-        - echo "No preBuild step: static HTML/CSS/JS served as-is."
-    build:
-      commands:
-        - echo "No build step: publishing static files unchanged."
-  artifacts:
-    # App root is set to `frontend` in the Amplify console, so the static files
-    # are in the current directory. Publish them all.
-    baseDirectory: '.'
-    files:
-      - '**/*'
-  # No cache: there are no dependencies to install or restore.
-  cache:
-    paths: []
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - echo "No preBuild step: static HTML/CSS/JS served as-is."
+        build:
+          commands:
+            - echo "No build step: publishing static files unchanged."
+      artifacts:
+        # Amplify runs within appRoot=frontend, so the static files are in the
+        # current directory. Publish them all.
+        baseDirectory: .
+        files:
+          - '**/*'
+      # No cache: there are no dependencies to install or restore.
+      cache:
+        paths: []
