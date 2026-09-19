@@ -1,0 +1,17 @@
+# This directory is the `python/` root of the aws-xray-sdk Lambda layer asset.
+#
+# It is committed empty (this .keep) on purpose: `SudokuStack` references
+# `build/xray-layer` as a `lambda_.Code.from_asset(...)` layer, and `cdk synth`
+# (and the offline template-assertion suite) stages this local directory at
+# synth time. That staging only needs the directory to EXIST — it does not need
+# the third-party wheels present — so keeping this placeholder lets the offline
+# suite synthesize with no network and no `pip install`.
+#
+# The actual dependencies (aws-xray-sdk + wrapt) are installed here by
+# `just build-layer` (which `just deploy` runs first). That step needs PyPI and
+# is therefore a deploy-time concern, never part of the offline `just test`.
+#
+# The installed wheels themselves are git-ignored (see .gitignore `build/` plus
+# the `build/xray-layer/python/*` re-ignore); only this .keep is tracked, so the
+# asset path always resolves. `just build-layer` clears the installed packages
+# but preserves this file.

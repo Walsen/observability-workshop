@@ -1,0 +1,164 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+# ...but keep ONLY the xray-layer asset's directory skeleton tracked (the
+# .keep), not the wheels `just build-layer` installs into it. `SudokuStack`
+# references build/xray-layer as a Lambda layer asset, and `cdk synth` (plus the
+# offline template-assertion suite) stages that local directory at synth time —
+# it only needs the directory to EXIST, not the wheels. Tracking the .keep keeps
+# synth offline on a fresh checkout / clean CI runner; the installed wheels stay
+# ignored (they are a deploy-time artifact). The rules un-ignore the directory
+# chain for traversal, then keep the directory's CONTENTS ignored, then
+# re-include the single .keep.
+!build/
+!build/xray-layer/
+!build/xray-layer/python/
+build/xray-layer/python/*
+!build/xray-layer/python/.keep
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django / Flask / Scrapy
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv / poetry / pdm
+#Pipfile.lock
+#poetry.lock
+#pdm.lock
+.pdm.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder / Rope
+.spyderproject
+.spyproject
+.ropeproject
+
+# mkdocs
+/site
+
+# mypy / Pyre / pytype
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# IDEs
+.idea/
+.vscode/
+
+# Environment files
+.env.*
+
+# Devbox
+.devbox/
+
+# Devbox / uv managed environment (reproducible dev environment task 1.1)
+# .devbox/ is already ignored above; ensure the uv-managed virtualenv dir and
+# any local secrets / generated credential tree are never committed.
+.venv/
+
+# Local, git-ignored secrets file (non-sensitive config goes in .env.development,
+# which .envrc loads; real secrets live here or in the platform secret store).
+.env.local
+
+# Generated credential tree (e.g. locally-generated AWS credentials/config).
+.aws/
+
+# CDK synth output. `cdk synth` / `just synth` writes the synthesized
+# CloudFormation template and assets here; it is a generated artifact, never
+# committed. The offline template assertions (task 10.6) synthesize on demand.
+cdk.out/
+
+# CDK deploy outputs file (`cdk deploy --outputs-file`). A generated artifact of
+# a live deploy that captures the ApiEndpointUrl; never committed.
+cdk-deploy-outputs.json

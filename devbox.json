@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.3/.schema/devbox.schema.json",
+  "packages": [
+    "python@3.12.14",
+    "uv@0.12.5",
+    "just@1.58.0",
+    "jq@1.8.2",
+    "yq-go@4.53.3",
+    "aws-cdk-cli@2.1138.0",
+    "awscli2@2.35.11",
+    "git@2.55.0",
+    "gh@2.98.0"
+  ],
+  "shell": {
+    "//": "init_hook surfaces `node` on PATH from the aws-cdk-cli closure. jsii (which aws_cdk / constructs drive on import) needs a bare `node`, but devbox does not expose one even though the pinned aws-cdk-cli bundles nodejs in its closure. Steering says node must come from that closure, not a separate `nodejs` package, so we derive node's bin dir from the `cdk` launcher's shebang (dynamic, so it tracks aws-cdk-cli upgrades rather than pinning a brittle /nix/store path) and prepend it. Fixes `cdk synth`, `just synth`, and the offline CDK assertion tests (`import aws_cdk`) for every recipe and `uv run`.",
+    "init_hook": [
+      "if command -v cdk >/dev/null 2>&1; then _cdk_node_bin=$(dirname \"$(sed -n '1s/^#!//p' \"$(readlink -f \"$(command -v cdk)\")\")\"); case \":$PATH:\" in *\":$_cdk_node_bin:\"*) ;; *) export PATH=\"$_cdk_node_bin:$PATH\" ;; esac; unset _cdk_node_bin; fi"
+    ],
+    "scripts": {}
+  }
+}
