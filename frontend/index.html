@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>X-Ray Sudoku</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="app__header">
+      <h1>X-Ray Sudoku</h1>
+      <p class="app__tagline">
+        A tiny Sudoku game whose every action is one end-to-end X-Ray trace.
+      </p>
+    </header>
+
+    <!--
+      Controls. Each button is a labelled, keyboard-usable control. "New Game"
+      requests a fresh puzzle; "Solve" asks the backend to complete the current
+      board. They are disabled until the API is configured (see app.js).
+    -->
+    <div class="controls" role="group" aria-label="Game controls">
+      <button type="button" id="new-game-btn" class="controls__btn">New Game</button>
+      <button type="button" id="solve-btn" class="controls__btn" disabled>Solve</button>
+    </div>
+
+    <!--
+      Status / message region. aria-live="polite" so feedback (invalid move,
+      solved, errors, the not-configured notice) is announced to assistive
+      technology without stealing focus. It is always present in the DOM.
+    -->
+    <div
+      id="message"
+      class="message"
+      role="status"
+      aria-live="polite"
+      hidden
+    ></div>
+
+    <!--
+      The 9x9 board. Rendered by app.js into a 81-cell grid of <input> elements.
+      Given cells are read-only; empty cells accept a single digit 1-9 and submit
+      a move on change. Labelled as a group for assistive tech.
+    -->
+    <section aria-label="Sudoku board">
+      <div id="board" class="board" role="grid" aria-label="Sudoku board grid"></div>
+    </section>
+
+    <footer class="app__footer">
+      <p id="game-id" class="app__game-id" aria-live="polite"></p>
+    </footer>
+  </main>
+
+  <!--
+    No-build static site: plain <script> tags, config first so window.APP_CONFIG
+    and apiBaseUrl() exist before app.js runs, then app.js which wires the UI.
+  -->
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

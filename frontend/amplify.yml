@@ -1,0 +1,52 @@
+# amplify.yml — AWS Amplify Hosting build spec for the X-Ray Sudoku frontend.
+#
+# ── No build step ────────────────────────────────────────────────────────────
+# This is a no-build static site: plain HTML, CSS, and JavaScript (index.html,
+# styles.css, config.js, app.js) served exactly as committed. There is no
+# bundler, transpiler, or npm install, so the build phases below are deliberate
+# no-ops. Amplify still requires a `frontend` phase block, so we echo a message
+# instead of running a build, then publish the files as-is (Requirements 10.1,
+# 10.3).
+#
+# ── Amplify app root assumption ──────────────────────────────────────────────
+# This file lives at `frontend/amplify.yml`, and the frontend itself lives in the
+# repository's `frontend/` folder (Requirement 10.2). When the operator connects
+# the app in the Amplify console, they set the app's root (monorepo "app root")
+# to `frontend`. With the app root set to `frontend`, Amplify runs this spec from
+# inside `frontend/`, so the static files (index.html, styles.css, config.js,
+# app.js) are in the current directory. `artifacts.baseDirectory: '.'` therefore
+# publishes exactly those files. (If the app root were left at the repo root
+# instead, baseDirectory would need to be `frontend` — set the app root to
+# `frontend` to match this spec.)
+#
+# ── Operator handoff: connecting Amplify and pointing at the API ─────────────
+# Amplify Hosting is connected manually in the console, NOT via CDK. Branch-based
+# deployments then serve `main` to the production URL (Requirement 10.5) and
+# `feature/*` to preview URLs (Requirement 10.6).
+#
+# The two-step deploy handoff (Requirement 10.4):
+#   1. `just deploy` runs `cdk deploy`, which prints the `API_Endpoint_URL`
+#      stack output.
+#   2. Because these files are served as-is with no build-time substitution, the
+#      operator sets that URL by editing the `__API_ENDPOINT_URL__` placeholder
+#      in `config.js` to the deployed `API_Endpoint_URL`, then commits/pushes so
+#      Amplify redeploys. (See config.js and design.md "Deployment Handoff".)
+
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - echo "No preBuild step: static HTML/CSS/JS served as-is."
+    build:
+      commands:
+        - echo "No build step: publishing static files unchanged."
+  artifacts:
+    # App root is set to `frontend` in the Amplify console, so the static files
+    # are in the current directory. Publish them all.
+    baseDirectory: '.'
+    files:
+      - '**/*'
+  # No cache: there are no dependencies to install or restore.
+  cache:
+    paths: []

@@ -1,0 +1,30 @@
+[project]
+name = "xray-sudoku-demo"
+version = "0.1.0"
+description = "X-Ray Sudoku Demo backend: CDK app, Lambda handlers, and Sudoku domain (Python 3.12)."
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib>=2.270.0",
+    "aws-xray-sdk>=2.15.0",
+    "boto3>=1.43.98",
+    "constructs>=10.8.1",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.168.0",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["."]
+
+# aws-xray-sdk, boto3, and botocore ship no type stubs bundled here, so their
+# imports are untyped. Scope the allowance to those packages only; the rest of
+# the codebase stays fully type-checked.
+[[tool.mypy.overrides]]
+module = ["aws_xray_sdk.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
