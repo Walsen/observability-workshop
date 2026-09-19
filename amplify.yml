@@ -1,19 +1,27 @@
 # amplify.yml — AWS Amplify Hosting build spec for the X-Ray Sudoku frontend.
 #
+# ── Location: the REPO ROOT ──────────────────────────────────────────────────
+# This file lives at the REPOSITORY ROOT, not in the app subdirectory. For a
+# monorepo app, Amplify Hosting reads the build spec (amplify.yml) from the repo
+# root — it does NOT look inside the app subdirectory. When the spec was kept at
+# `frontend/amplify.yml`, Amplify never saw it and failed the build with:
+#     CustomerError: Monorepo spec provided without "applications" key
+# because it fell back to a missing/implicit spec. Placing this file at the repo
+# root is what lets Amplify find the monorepo `applications:` spec.
+#
 # ── Monorepo build spec (applications / appRoot) ─────────────────────────────
 # The Amplify app is registered as a monorepo ("My app is a monorepo" is checked
 # in the console, with the monorepo root directory set to `frontend`). When an
 # app is a monorepo, Amplify REQUIRES the build spec to use the top-level
 # `applications:` array, where each entry carries an `appRoot`. A single-app
-# spec with a top-level `frontend:` key is rejected at build time with:
-#     CustomerError: Monorepo spec provided without "applications" key
-# so the spec below uses `applications:` with one entry.
+# spec with a top-level `frontend:` key is rejected at build time with the same
+# "Monorepo spec provided without applications key" error, so the spec below
+# uses `applications:` with one entry.
 #
-# `appRoot: frontend` is relative to the REPO ROOT and must match the monorepo
-# root directory configured in the Amplify console (`frontend`). This file lives
-# at `frontend/amplify.yml`; for a monorepo spec Amplify reads the build spec
-# from the repo root or the app root, so keeping the file here with
-# `appRoot: frontend` is fine (Requirement 10.2).
+# `appRoot: frontend` is relative to this repo root and must match the monorepo
+# root directory configured in the Amplify console (`frontend`). It points
+# Amplify at the `frontend/` app directory, where the static files live
+# (Requirement 10.2).
 #
 # ── No build step ────────────────────────────────────────────────────────────
 # This is a no-build static site: plain HTML, CSS, and JavaScript (index.html,
