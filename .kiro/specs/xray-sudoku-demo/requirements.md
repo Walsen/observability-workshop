@@ -26,6 +26,16 @@ The game is fully playable and supports multiple concurrent users through a clie
 - **CDK_App**: The AWS CDK application, written in Python, that defines the backend infrastructure (API Gateway, Lambda functions, DynamoDB table).
 - **API_Endpoint_URL**: The invoke URL of the API, emitted as a CDK stack output after deployment.
 - **Move**: A single value placement by a Player into one cell of the Sudoku board.
+- **Canary**: An AWS CloudWatch Synthetics browser canary that, on a schedule, drives the deployed Frontend with a headless browser to exercise the New Game and Solve flows as a synthetic Player.
+- **Canary_Target_URL**: The live Frontend URL (the Amplify_Hosting domain) that the Canary loads, supplied by the operator as a CDK context value (`canary_target_url`).
+- **Alarm**: An Amazon CloudWatch alarm that transitions to the `ALARM` state when the Canary's success rate falls below a configured threshold.
+- **Success_Percent**: The CloudWatch Synthetics `SuccessPercent` metric, the percentage of Canary runs that completed successfully over a period.
+- **Cost_Allocation_Tag**: An AWS resource tag that, once activated in the AWS Billing console of the management (payer) account, becomes a dimension by which AWS Cost Explorer can group and filter cost and usage.
+- **Project_Tag**: The specific Cost_Allocation_Tag with key `Project` and value `xray-sudoku-demo` applied to every taggable resource in the CDK_App, used to attribute AWS spend to the X_Ray_Sudoku_Demo.
+- **Cost_Report**: The read-only report of the X_Ray_Sudoku_Demo's AWS cost, produced by the `get-cost` skill from the AWS Cost Explorer `getCostAndUsage` operation via the AWS Billing & Cost Management MCP server.
+- **Player_Stats_Report**: The read-only report of player and usage statistics for the X_Ray_Sudoku_Demo — distinct players, total games, games by status, and an estimated synthetic/organic split — produced by the `get-players` skill from a paginated scan of the Games_Table via the `just player-stats` recipe.
+- **Distinct_Players**: The count of unique Player_Id values across all game items in the Games_Table; a proxy for the number of people playing, given that a Player_Id is a browser-generated identifier with no managed authentication behind it.
+- **Estimated_Synthetic_Games**: The estimated number of games created by the Canary rather than by real Players, inferred as a documented heuristic from the Canary's regular ~5-minute creation cadence, because the Canary uses plain-UUID Player_Id values indistinguishable from those of real Players. Its complement over the total is the Estimated_Organic_Games.
 
 ## Requirements
 
@@ -140,3 +150,48 @@ The game is fully playable and supports multiple concurrent users through a clie
 4. WHERE the operator provides the API_Endpoint_URL as an Amplify configuration value, THE Frontend SHALL send API requests to that configured URL.
 5. WHEN the operator pushes the `main` Git branch, THE Amplify_Hosting SHALL deploy the Frontend to the production URL.
 6. WHEN the operator pushes a `feature/*` Git branch, THE Amplify_Hosting SHALL deploy the Frontend to a preview URL.
+
+### Requirement 11: Synthetic canary monitoring and alerting
+
+**User Story:** As an operator, I want a synthetic browser canary that continuously exercises the deployed game and alarms on failure, so that a broken New Game or Solve flow surfaces automatically and each scheduled run produces an end-to-end X-Ray trace.
+
+#### Acceptance Criteria
+
+1. WHERE the operator provides the Canary_Target_URL as the `canary_target_url` CDK context value, THE CDK_App SHALL create the Canary; and WHERE the `canary_target_url` context value is absent, THE CDK_App SHALL synthesize the stack without the Canary.
+2. WHILE the Canary is deployed, THE Canary SHALL run on a schedule of once every 5 minutes.
+3. WHEN the Canary runs, THE Canary SHALL load the Canary_Target_URL in a headless browser, activate the New Game action, and assert that a 9×9 board renders.
+4. WHEN the Canary has a rendered board, THE Canary SHALL activate the Solve action and assert that the board reaches the solved state.
+5. WHEN the Canary runs, THE Canary SHALL have AWS X-Ray active tracing enabled so that the run produces a Trace spanning the Frontend, API, Lambda_Function, and Games_Table.
+6. WHEN the Canary runs, THE Canary SHALL write run artifacts, including step screenshots, to a CloudWatch Synthetics artifacts store.
+7. IF the Canary Success_Percent falls below the configured threshold over the configured number of evaluation periods, THEN THE Alarm SHALL transition to the `ALARM` state.
+8. THE CDK_App SHALL grant the Canary only the permissions required to run the browser script, write artifacts, publish metrics, and write trace data to AWS X-Ray.
+
+### Requirement 12: Cost attribution and reporting
+
+**User Story:** As an operator, I want the demo's resources tagged for cost allocation and a way to report the solution's AWS spend, so that I can attribute and track what the X-Ray Sudoku Demo costs to run.
+
+#### Acceptance Criteria
+
+1. THE CDK_App SHALL apply the Cost_Allocation_Tags `Project` = `xray-sudoku-demo` and `ManagedBy` = `cdk` at the app level so that CDK propagates them to every taggable resource it defines (the Lambda_Functions, the Games_Table, the API, the Canary and its artifacts store, and the associated IAM roles).
+2. WHERE the Project_Tag is activated as a cost-allocation tag in the AWS Billing console, THE Cost_Report SHALL attribute AWS cost to the X_Ray_Sudoku_Demo by filtering on the Project_Tag.
+3. WHEN the operator requests the Cost_Report without specifying a time window, THE Cost_Report SHALL cover the current month-to-date period.
+4. WHERE the operator specifies a time window, THE Cost_Report SHALL cover the specified window, supporting the last seven days and an explicit start-and-end date range.
+5. WHEN the Cost_Report is produced, THE Cost_Report SHALL exclude `Credit` and `Refund` record types by default.
+6. IF the Project_Tag is not yet active as a cost-allocation tag, THEN THE Cost_Report SHALL fall back to reporting cost grouped by AWS service (Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify, and Data Transfer).
+7. WHERE the operator requests a month-end projection, THE Cost_Report SHALL include a forecasted cost for the current month.
+8. THE Cost_Report SHALL be read-only and SHALL introduce no billable infrastructure beyond the negligible cost of the Cost Explorer API calls it makes.
+
+### Requirement 13: Player statistics reporting
+
+**User Story:** As an operator, I want a way to report how many people are playing the demo and how many games they have played, so that I can gauge usage while staying honest about what the numbers can and cannot tell me.
+
+#### Acceptance Criteria
+
+1. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the Distinct_Players as the count of unique Player_Id values across the Games_Table.
+2. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the total number of games.
+3. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the number of games broken down by game status, and the per-status counts SHALL sum to the total number of games.
+4. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the Estimated_Synthetic_Games and the Estimated_Organic_Games, and SHALL label them as an estimate derived from the Canary's ~5-minute creation cadence rather than a measured fact, and the two values SHALL sum to the total number of games.
+5. THE Player_Stats_Report SHALL be read-only, performing only a projected scan of the Games_Table and never a write.
+6. THE aggregation logic that computes the Player_Stats_Report SHALL be a pure function of already-loaded game items, separated from the AWS I/O so that it is offline-testable with no AWS credentials and no network.
+7. WHEN the operator resolves the Games_Table name, THE Player_Stats_Report SHALL take it from an explicit table-name argument if given, else the `GAMES_TABLE` environment variable, else discovery of the `XraySudokuDemoStack` stack, in that order of precedence.
+8. THE Player_Stats_Report SHALL be produced through the `just player-stats` command surface, and its scan SHALL be paginated and project only the attributes it needs (`gameId`, `playerId`, `status`, `createdAt`).

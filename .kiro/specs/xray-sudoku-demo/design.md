@@ -333,6 +333,118 @@ neither read nor mutate another player's game.
   `xray:PutTraceSegments` / `xray:PutTelemetryRecords` for trace writes. No
   Lambda receives blanket table or account access.
 
+## Synthetic Canary Monitoring (CloudWatch Synthetics)
+
+This slice adds a **CloudWatch Synthetics browser canary** that behaves as a
+synthetic Player: on a schedule it drives the *live* Amplify-hosted Frontend
+with a headless browser, and because that browser makes the same API calls a
+real user's browser makes (now that CORS is locked to the Amplify origin), each
+scheduled run becomes a real end-to-end request that is traced through
+CloudFront/Amplify → API Gateway → Lambda → DynamoDB. A CloudWatch **alarm** on
+the canary's success rate makes a broken New Game or Solve flow surface
+automatically (Requirement 11).
+
+The canary complements the existing X-Ray story rather than changing it: the
+frontend, API, Lambdas, and table are unchanged; the canary is simply a
+scheduled, monitored synthetic user in front of them.
+
+### Canary type and browser script
+
+The canary is a **UI (browser) canary** on the Synthetics
+`syn-nodejs-puppeteer` runtime — a headless Chromium driven by Puppeteer. Its
+handler is a small **Node.js** script following the Synthetics handler contract
+(`exports.handler`), using the `Synthetics` library's `executeStep` to record
+each step as a named, screenshotted step (Synthetics captures screenshots on
+each step and on failure automatically) (Requirement 11.6). The script steps
+are:
+
+1. **load-site** — navigate to the `Canary_Target_URL`.
+2. **new-game** — click the "New Game" control and wait for the board.
+3. **assert-board** — assert a 9×9 board (81 cells) has rendered.
+4. **solve** — click the "Solve" control.
+5. **assert-solved** — assert the board reaches the solved/completed state.
+
+Any failed assertion fails the step, which fails the run and lowers
+`SuccessPercent` (Requirement 11.3, 11.4).
+
+Because this script is **Node, not Python**, and is *invoked* by the Synthetics
+runtime rather than *imported* by any Python code, it is **not** a `uv`
+dependency and does not appear in `pyproject.toml` (dev-environment steering:
+import-vs-invoke). It is an **asset file** bundled by CDK. It lives at:
+
+```
+backend/infra/canary/
+└── sudoku_canary.js        # Node/Puppeteer Synthetics handler (asset, not imported)
+```
+
+### CDK construct: stable aws_synthetics, alpha module intentionally avoided
+
+The canary is defined with the **stable** `aws_cdk.aws_synthetics` module that
+ships in the already-pinned `aws-cdk-lib` (2.270.0), using the **L2 `Canary`
+construct**. The alpha module `aws_cdk.aws_synthetics_alpha` is **intentionally
+not used** and is **not** added as a dependency — the stable module provides
+both the L2 `Canary` and the L1 `CfnCanary`, so no alpha package is required.
+The L2 `Canary` cleanly covers everything this slice needs:
+
+- **runtime** — `Runtime.SYNTHETICS_NODEJS_PUPPETEER_*` (a
+  `syn-nodejs-puppeteer` runtime).
+- **schedule** — `Schedule.rate(Duration.minutes(5))` → `rate(5 minutes)`
+  (Requirement 11.2).
+- **test/code** — `Code.from_asset(...)` pointing at `backend/infra/canary/`
+  with the handler `sudoku_canary.handler`.
+- **active tracing** — `active_tracing=True`, enabling X-Ray on the canary runs
+  (Requirement 11.5).
+- **artifacts bucket** — the L2 construct provisions the artifacts S3 bucket and
+  the canary's execution role for you (Requirement 11.6); the target URL is
+  passed to the script via an environment variable.
+
+If a future need exceeds the L2 surface, the fallback is the L1
+`CfnCanary` from the *same stable module* — still no alpha package.
+
+The **CloudWatch alarm** uses the stable `aws_cdk.aws_cloudwatch` module. The
+alarm is built on the canary's `SuccessPercent` metric — obtained from the L2
+canary's `metric_success_percent()` (equivalently a `cloudwatch.Metric` in the
+`CloudWatchSynthetics` namespace, dimension `CanaryName`) — and alarms when
+success drops below the threshold (e.g. `threshold=100`,
+`comparison=LESS_THAN_THRESHOLD`, over N evaluation periods) (Requirement 11.7).
+
+### Operator-configured target URL and conditional creation
+
+The canary needs the live site URL, supplied the **same operator-configured way
+the stack already handles `allowed_origin`**: as a **CDK context value**
+`canary_target_url` (e.g. `-c canary_target_url=https://main.<id>.amplifyapp.com`),
+documented so no URL is hardcoded and `cdk synth` stays offline. The stack reads
+it with `self.node.try_get_context("canary_target_url")`:
+
+- **When provided** — the stack creates the canary (with the URL passed into the
+  script's environment), the artifacts bucket, and the alarm.
+- **When absent** — the stack synthesizes **without** the canary, so the
+  existing offline synth (which supplies no context) continues to resolve
+  nothing from an account and produce the same backend template (Requirement
+  11.1).
+
+The offline template-assertion test synthesizes **with** the
+`canary_target_url` context supplied, so it can assert the canary and alarm
+resources exist.
+
+### IAM (least privilege) and the offline guarantee
+
+Consistent with the existing least-privilege framing: the canary runs under its
+**own execution role** created by the L2 construct, scoped to running the
+browser script, writing run artifacts to its artifacts bucket, publishing
+CloudWatch metrics, and writing trace data to X-Ray — no blanket bucket or
+account access (Requirement 11.8). This mirrors the per-Lambda least-privilege
+model already used for the four handlers.
+
+The canary/alarm resources are **synthesized and asserted entirely offline**
+(no credentials, no network, `cdk synth` resolves nothing from an account),
+exactly like the existing infra assertions — the browser script is a local asset
+and the target URL comes from context, not an account lookup. The **live canary
+is a billable, deploy-time resource** (scheduled canary runs, its artifacts S3
+bucket, and the alarm), so it is **not** part of `just test`; it deploys with
+the stack when `canary_target_url` is supplied to `cdk deploy` alongside the
+existing `allowed_origin` context.
+
 ## Toolchain and Dependencies
 
 ### devbox packages (exact-version placeholders)
@@ -449,10 +561,23 @@ tests.
   CORS, a `CfnOutput` for the URL, region us-east-1, and IAM policies scoped to
   the table plus `xray:PutTraceSegments`.
 
+- **Canary / alarm (SMOKE / template assertions):** synthesizing the stack
+  **with** the `canary_target_url` context supplied (still no credentials, no
+  network), `aws_cdk.assertions.Template` asserts an `AWS::Synthetics::Canary`
+  exists with a `syn-nodejs-puppeteer` runtime, a `rate(5 minutes)` schedule,
+  active tracing enabled, and an artifacts location, plus an
+  `AWS::CloudWatch::Alarm` on the canary `SuccessPercent` metric with the
+  configured threshold/comparison. Synthesizing **without** the context asserts
+  the canary is absent (Requirement 11.1). No property test applies to the
+  canary — it is deploy-time infrastructure, not input-varying logic.
+
 Property tests run a minimum of 100 iterations and each references its design
 property below. End-to-end trace verification (Requirements 1.2/1.4) is an
 integration concern performed against the deployed stack (a handful of example
-traces via `aws xray`), explicitly outside the offline suite.
+traces via `aws xray`), explicitly outside the offline suite. Live verification
+that the deployed canary runs green and produces a trace (Requirement 11) is
+likewise outside the offline suite, since it depends on a billable live
+deployment.
 
 ## Correctness Properties
 
@@ -530,3 +655,228 @@ leaves the other pair's item unchanged, and a load for one pair never returns
 the other's game.
 
 **Validates: Requirements 7.3**
+
+## Cost Attribution and Reporting
+
+This slice makes the demo's AWS spend attributable and reportable. It adds **no
+runtime behavior and no billable infrastructure**: it tags the resources the
+stack already defines so their cost can be isolated, and it adds a read-only
+`get-cost` skill that queries Cost Explorer through the AWS Billing & Cost
+Management MCP server. It complements the existing X-Ray/observability story —
+tracing shows *where time goes* in a request; this shows *what the stack costs*
+to run (Requirement 12).
+
+### App-level cost-allocation tagging
+
+Rather than tag each construct individually, the tags are applied once at the
+**app level** in `backend/app.py`, and CDK's tag aspect propagates them down to
+every taggable resource in the tree (the four Lambda functions, the DynamoDB
+table, the REST API, the Synthetics canary and its artifacts bucket, and the
+IAM roles):
+
+```python
+app = cdk.App()
+cdk.Tags.of(app).add("Project", "xray-sudoku-demo")
+cdk.Tags.of(app).add("ManagedBy", "cdk")
+SudokuStack(app, _STACK_ID, env=cdk.Environment(region=_REGION))
+app.synth()
+```
+
+Applying to the `App` (rather than the `Stack`) keeps the tags in one place and
+ensures anything the stack adds later inherits them. The tag keys are `Project`
+(value `xray-sudoku-demo`, the **Project_Tag**) and `ManagedBy` (value `cdk`)
+(Requirement 12.1).
+
+Two caveats matter for interpreting the numbers, and the skill documents both:
+
+- **Not every line item carries the tag in Cost Explorer.** Some usage —
+  notably certain **Data Transfer** and some **CloudWatch/X-Ray** line items —
+  is not associated with a taggable resource, so a tag-filtered total can
+  slightly **under-count** true spend. The service-scoped fallback (below) and
+  the tag-scoped view are therefore **complementary**, not redundant.
+- **Tag-based cost requires manual activation and a backfill delay** (see the
+  prerequisite below).
+
+### Two reporting modes
+
+The `get-cost` skill reports cost two ways, and states which mode produced the
+numbers:
+
+1. **Tag-primary (precise, per-stack) — available after activation.** Filters
+   `getCostAndUsage` on the Project_Tag (`Project = xray-sudoku-demo`). This is
+   the precise cost of *this* solution's resources. It is only meaningful once
+   the operator has activated the `Project` cost-allocation tag in Billing and
+   ~24h of backfill has elapsed (Requirement 12.2).
+2. **Service-fallback (immediate, account-wide for those services).** Groups
+   `getCostAndUsage` by `SERVICE`, scoped to the services this stack uses —
+   Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify,
+   and Data Transfer. This works **immediately** with no activation, but for a
+   shared account it reflects account-wide spend on those services, not just
+   this stack's (Requirement 12.6). The skill uses this when the tag is not yet
+   active, and it is always a useful sanity check against the tag total.
+
+### The `get-cost` skill
+
+The skill lives at `.kiro/skills/get-cost/SKILL.md` and uses the
+**`awslabs.billing-cost-management` MCP server's `cost_explorer` tool** with the
+`getCostAndUsage` operation — **not** the AWS CLI, and **not** the CloudWatch
+Application Signals MCP server. Its behavior:
+
+- **Time window** — defaults to **month-to-date** (Requirement 12.3); also
+  accepts **last 7 days** and an **explicit start/end range** (Requirement
+  12.4). It chooses `DAILY` granularity for these short windows.
+- **Metric** — `UnblendedCost`.
+- **Record types** — excludes `Credit` and `Refund` by default via the
+  `getCostAndUsage` filter (Requirement 12.5).
+- **Grouping / filter** — tag-primary mode filters on the `Project` tag;
+  service-fallback mode groups by `SERVICE` over the stack's services
+  (Requirement 12.2, 12.6).
+- **Optional forecast** — when a month-end projection is requested, it also
+  calls `getCostForecast` for the remainder of the current month (Requirement
+  12.7).
+- **Read-only** — it only *reads* cost data; it provisions nothing and its only
+  cost is the negligible per-request Cost Explorer API charge (Requirement
+  12.8).
+
+### Manual prerequisite: activating the Project cost-allocation tag
+
+Tag-based cost attribution is **not automatic**. The operator must, **once**, in
+the **management (payer) account only**:
+
+1. Open the AWS Billing console → **Cost allocation tags**.
+2. Activate the **`Project`** user-defined tag.
+3. Wait **~24 hours** for AWS to backfill the tag onto cost data before the
+   tag-filtered numbers become meaningful.
+
+Until then, the skill's tag-primary mode returns little or nothing, and the
+skill falls back to the service-scoped view (Requirement 12.6). The skill's
+documentation states this prerequisite and the lag explicitly, and notes the
+tag-vs-service views are complementary.
+
+### Testing and the offline guarantee
+
+Only the **CDK tagging** is covered by the offline suite: an
+`aws_cdk.assertions.Template` assertion that a representative taggable resource
+(e.g. the DynamoDB table and/or a Lambda) carries `Tags` including
+`Project = xray-sudoku-demo` in the synthesized template. This resolves nothing
+from an account and needs no credentials, exactly like the existing infra
+assertions. Note that resources render `Tags` differently in CloudFormation
+(a list of `{Key, Value}` vs. a map), so the assertion accommodates the shape of
+the resource it checks.
+
+The **skill itself is not part of `just test`**: it requires the Billing &
+Cost Management MCP server and a real account with billing data, so — like the
+end-to-end trace verification (task 13) and the live canary (task 14.4) — it is
+exercised against an account, not in the offline pytest suite.
+
+## Player Statistics Reporting
+
+This slice makes the demo's usage reportable. Like the cost reporting above it
+adds **no runtime behavior and no billable infrastructure**: it adds a
+read-only script that scans the Games_Table and a `get-players` skill that
+drives it. Where tracing shows *where time goes* and cost reporting shows *what
+the stack costs*, this shows *who is playing and how much* — distinct players,
+total games, games by status, and an estimated synthetic/organic split
+(Requirement 13).
+
+### Pure aggregation split from AWS I/O
+
+The script `scripts/player_stats.py` is deliberately split into two concerns so
+the whole of its logic that matters is offline-testable (Single Responsibility,
+dependency inversion — engineering-practices §1):
+
+- **Pure aggregation core.** `compute_player_stats(items)` takes
+  already-unmarshalled game items (plain dicts with `gameId`, `playerId`,
+  `status`, `createdAt`) and returns a frozen `PlayerStats` dataclass with
+  `total_games`, `distinct_players`, `games_by_status`, and the
+  synthetic/organic estimate. It touches no AWS and no wall clock, so every
+  count is a deterministic function of its input. Iteration order is defined
+  throughout — items are sorted by `createdAt` then `gameId`, and the status
+  tally is emitted in sorted key order — so nothing reaching the output relies
+  on set or incidental dict ordering (Requirement 13.6; engineering-practices
+  §2).
+- **AWS I/O layer.** `scan_and_compute(client, table_name)` runs the paginated,
+  projected scan and hands the unmarshalled items to the pure core;
+  `resolve_table_name(...)` discovers the table. Both take the boto3 client (or
+  client factories) as parameters, so a test injects a fake and no real client
+  is ever constructed at import time — `boto3` is imported lazily inside the CLI
+  path only (Requirement 13.5).
+
+### Table-name resolution
+
+`resolve_table_name` mirrors how `verify_trace.py` resolves the API URL, with a
+defined precedence (Requirement 13.7): an explicit `--table-name` argument, else
+the `GAMES_TABLE` environment variable, else discovery — the `XraySudokuDemoStack`
+CloudFormation `GamesTableName` output first, then a fallback of paging
+`list_tables` and matching the `XraySudokuDemoStack-GamesTable` prefix. The table
+name is never hardcoded; the two discovery clients arrive as factories so nothing
+is constructed unless discovery is actually reached.
+
+### The projected, paginated scan
+
+`scan_and_compute` reads only the four attributes it needs via a
+`ProjectionExpression`, keeping the scan cheap regardless of how large the game
+items are (they also hold board/puzzle/solution data the report never touches).
+`status` is a DynamoDB reserved word, so it is projected through the `#s`
+`ExpressionAttributeNames` alias. The scan follows `LastEvaluatedKey` to the end
+so every page is aggregated (Requirement 13.8). Only the four projected keys
+reach the pure core, so nothing sensitive is carried along even if an item has
+more attributes (engineering-practices §6).
+
+### The synthetic estimate heuristic — and its honesty caveat
+
+The Synthetics canary drives the UI every 5 minutes with plain-UUID `playerId`s
+that are indistinguishable from real players' ids, so synthetic traffic **cannot
+be cleanly excluded by id** — it can only be **estimated** from the ~5-minute
+`createdAt` cadence. `estimate_synthetic_games(items, cadence_minutes=5,
+tolerance_seconds=90)` sorts games by `createdAt` and counts those that fall on a
+regular ~cadence-spaced series: walking the games in time order, whenever the gap
+from the previous kept game is within tolerance of the cadence, both endpoints
+are treated as part of a synthetic run. Games with an unparseable timestamp and
+bursts spaced far from the cadence are left out (counted organic), and the result
+is bounded to `[0, total]` with `organic = total − synthetic`. This is a
+**documented heuristic, not a fact**: the dataclass, the prose report, and the
+`--json` output all label the split as an estimate, and the `get-players` skill
+repeats the caveat (Requirement 13.4).
+
+### Boundary error handling and structured logging
+
+The CLI catches expected failures at the boundary (engineering-practices §5): a
+`RuntimeError` from resolution/validation, an `OSError` from
+network/credential/transport, and a true top-level `except` for anything else
+(e.g. a botocore `ClientError`). Each prints one JSON error line and exits
+non-zero — never a raw traceback. Operational events go through a stdlib logger
+configured once to emit single-line JSON to **stderr** (engineering-practices
+§6), so stdout carries only the report (prose, or `--json`); it never `print()`s
+logs and never logs board/solution data.
+
+### The `get-players` skill and the command surface
+
+The report is produced through the `just player-stats` recipe (Requirement
+13.8), which runs `uv run python scripts/player_stats.py` and passes through
+flags such as `--json` and `--table-name`. The skill at
+`.kiro/skills/get-players/SKILL.md` documents the workflow and — like `get-cost`
+— states the honesty caveats plainly: a "player" is a browser-generated
+`playerId` with no auth (the same person on two devices counts twice; clearing
+`localStorage` starts fresh), the canary split is only an estimate, and the scan
+has no time window by default (all-time, full-table).
+
+### Testing and the offline guarantee
+
+The pure core and the plumbing are fully covered by the offline suite in
+`backend/tests/test_player_stats.py`, with **no AWS and no network**: example
+tests for the aggregation (totals, distinct players ignoring duplicate ids,
+status tally, empty input) and the cadence heuristic (a 5-minute series counted
+synthetic, irregular spacing counted organic, a mix split correctly, and the
+tolerance boundary); table-name resolution precedence and the paginated scan
+exercised against hand-rolled fake clients that record the `scan` kwargs (so the
+`ProjectionExpression` and the `#s` reserved-word alias are asserted); and a
+Hypothesis property test (≥100 examples) for the invariants that
+`distinct_players ≤ total_games` and that the status tally and the
+synthetic/organic split each sum to `total_games`. No `moto` dependency is added
+— fakes suffice, mirroring `test_repository.py`.
+
+The **script itself is not part of `just test`**: its scan needs AWS credentials
+and the network, so — like the end-to-end trace verification (task 13), the live
+canary (task 14.4), and the `get-cost` skill (task 15) — it is run against an
+account via `just player-stats`, not in the offline pytest suite.

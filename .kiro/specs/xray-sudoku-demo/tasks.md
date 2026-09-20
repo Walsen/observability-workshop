@@ -241,6 +241,72 @@ HTML/CSS/JS (frontend), per `design.md`.
     - Write a script/test that drives a request through the deployed API and inspects the resulting trace with `aws xray get-trace-summaries` / `aws xray batch-get-traces`, asserting a single trace spans Frontend → API → Lambda → DynamoDB with the four solver subsegments present
     - _Requirements: 1.2, 1.4, 10.4, 10.5, 10.6; Design: End-to-End Trace Propagation, Deployment Handoff_
 
+- [ ] 14. Add synthetic canary monitoring and alerting
+  - [ ] 14.1 Write the Puppeteer canary browser script asset
+    - In `backend/infra/canary/sudoku_canary.js`, implement a Node/Puppeteer Synthetics handler (`exports.handler`) following the Synthetics handler contract, using `Synthetics.executeStep` for each named step: load the `canary_target_url` (read from an environment variable), click "New Game" and assert a 9×9 board (81 cells) renders, click "Solve" and assert the board reaches the solved state; rely on Synthetics automatic step/failure screenshots
+    - This is a Node asset invoked by the Synthetics runtime, not imported by Python — it does NOT go in `pyproject.toml`; it is exercised live, not in the offline pytest suite
+    - _Requirements: 11.3, 11.4, 11.6; Design: Synthetic Canary Monitoring (Canary type and browser script)_
+
+  - [ ] 14.2 Add the Canary, artifacts bucket, active tracing, schedule, and alarm to the stack
+    - In `infra/sudoku_stack.py`, read `self.node.try_get_context("canary_target_url")`; WHEN present, create a `Canary` (stable `aws_cdk.aws_synthetics` L2 — alpha module intentionally not used) with a `syn-nodejs-puppeteer` runtime, `Code.from_asset("backend/infra/canary")` + handler `sudoku_canary.handler`, `Schedule.rate(Duration.minutes(5))`, `active_tracing=True`, and the target URL passed via script environment; the L2 construct provisions the artifacts bucket and least-privilege execution role
+    - Add a `cloudwatch.Alarm` on the canary `SuccessPercent` metric (`metric_success_percent()`), threshold below 100 over N evaluation periods (`LESS_THAN_THRESHOLD`); WHEN the context value is absent, synthesize without the canary/alarm so the existing offline backend template is unchanged
+    - _Requirements: 11.1, 11.2, 11.5, 11.6, 11.7, 11.8; Design: Synthetic Canary Monitoring (CDK construct; Operator-configured target URL; IAM)_
+
+  - [ ]* 14.3 Write offline CDK synth template assertions for the canary and alarm
+    - Using `aws_cdk.assertions.Template` with the stack synthesized **with** `canary_target_url` context supplied (no credentials, no network): assert an `AWS::Synthetics::Canary` with a `syn-nodejs-puppeteer` runtime, `rate(5 minutes)` schedule, active tracing enabled, and an artifacts location; and an `AWS::CloudWatch::Alarm` on the canary `SuccessPercent` metric with the configured threshold/comparison
+    - Also assert that synthesizing **without** the context omits the canary (Requirement 11.1)
+    - _Requirements: 11.1, 11.2, 11.5, 11.6, 11.7; Design: Testing Strategy (Canary / alarm template assertions)_
+
+  - [ ] 14.4 Deploy and verify the live canary (outside the offline suite)
+    - This task requires AWS credentials and a live deployment; it is explicitly NOT part of the offline `just test` suite (mirrors task 13)
+    - Deploy with `cdk deploy -c canary_target_url=<amplify-url> -c allowed_origin=<amplify-url>`; confirm the canary runs green on its 5-minute schedule and produces an X-Ray trace spanning Frontend → API → Lambda → DynamoDB, and confirm the CloudWatch alarm on `SuccessPercent` exists
+    - _Requirements: 11.2, 11.3, 11.4, 11.5, 11.7; Design: Synthetic Canary Monitoring (IAM and the offline guarantee)_
+
+- [x] 15. Cost attribution: tag resources and add a cost skill
+  - [x] 15.1 Add app-level cost-allocation tags in backend/app.py
+    - In `backend/app.py`, after constructing the `cdk.App()` and before `app.synth()`, apply `cdk.Tags.of(app).add("Project", "xray-sudoku-demo")` and `cdk.Tags.of(app).add("ManagedBy", "cdk")` so CDK propagates the tags to every taggable resource (the four Lambdas, the Games_Table, the API, the Canary + its artifacts bucket, and the IAM roles)
+    - _Requirements: 12.1; Design: Cost Attribution and Reporting (App-level cost-allocation tagging)_
+
+  - [x]* 15.2 Write offline CDK synth template assertion for the Project tag
+    - Using `aws_cdk.assertions.Template` (no credentials, no network): synthesize the stack and assert a representative taggable resource — e.g. the DynamoDB table and/or a Lambda function — carries `Tags` including `Project` = `xray-sudoku-demo` in the synthesized template; accommodate that resources render `Tags` as a list of `{Key, Value}` or a map depending on the resource type
+    - Offline, no creds — extends the existing `test_infra_synth.py` assertions
+    - _Requirements: 12.1; Design: Cost Attribution and Reporting (Testing and the offline guarantee)_
+
+  - [x] 15.3 Write the get-cost skill
+    - Create `.kiro/skills/get-cost/SKILL.md` describing a read-only cost report built on the `awslabs.billing-cost-management` MCP server's `cost_explorer` tool (`getCostAndUsage`) — NOT the AWS CLI and NOT the CloudWatch Application Signals server
+    - Document both modes: tag-primary (filter on `Project` = `xray-sudoku-demo`, precise per-stack, available only after Billing activation + ~24h) and service-fallback (group by `SERVICE` over Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify, Data Transfer — immediate but account-wide)
+    - Default the window to month-to-date; support last-7-days and explicit start/end ranges; use `UnblendedCost`; exclude `Credit`/`Refund` record types by default; optionally call `getCostForecast` for a month-end projection
+    - Document the manual prerequisite (activate the `Project` cost-allocation tag in Billing, management/payer account only, then ~24h backfill lag) and that tag-filtered and service-filtered views are complementary
+    - Not part of the offline pytest suite (needs the Billing MCP server + a real account)
+    - _Requirements: 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8; Design: Cost Attribution and Reporting (Two reporting modes; The get-cost skill; Manual prerequisite)_
+
+  - [x] 15.4 Deploy the tag change and verify resources carry the tag (outside the offline suite)
+    - This task requires AWS credentials and a live deployment; it is explicitly NOT part of the offline `just test` suite (mirrors tasks 13 and 14.4)
+    - Run `just deploy` / `cdk deploy` with the existing `-c allowed_origin=<amplify-url>` and `-c canary_target_url=<amplify-url>` context so the tags reach the deployed resources; note the operator must then activate the `Project` cost-allocation tag in the Billing console (management/payer account) and allow ~24h before tag-based cost appears
+    - Verify the deployed resources carry the tag, e.g. `aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=xray-sudoku-demo` or by describing the deployed table's tags
+    - _Requirements: 12.1, 12.2; Design: Cost Attribution and Reporting (Manual prerequisite; Testing and the offline guarantee)_
+
+- [x] 16. Player statistics: script, recipe, and skill
+
+  - [x] 16.1 Implement the pure aggregation core with tests
+    - In `scripts/player_stats.py`, implement the pure, AWS-free core: `compute_player_stats(items)` returning a frozen `PlayerStats` (`total_games`, `distinct_players`, `games_by_status`, and the synthetic/organic estimate), and `estimate_synthetic_games(items, cadence_minutes=5, tolerance_seconds=90)` — a documented cadence heuristic, not a fact. Iterate in a defined order (sort by `createdAt` then `gameId`; emit the status tally in sorted key order); rely on no set/dict ordering
+    - In `backend/tests/test_player_stats.py` (offline, no creds/network): example tests for totals, distinct players ignoring duplicate ids, the status tally, and the empty-input edge case; example tests for the cadence heuristic (a 5-minute series counted synthetic, irregular spacing organic, a mix split correctly, and the tolerance boundary); and a Hypothesis property test (≥100 examples) for `distinct_players <= total_games` and that the status tally and the synthetic/organic split each sum to `total_games`
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.6; Design: Player Statistics Reporting (Pure aggregation split from AWS I/O; The synthetic estimate heuristic; Testing and the offline guarantee)_
+
+  - [x] 16.2 Implement the scan I/O layer and table-name resolution with tests
+    - In `scripts/player_stats.py`, implement `scan_and_compute(client, table_name)` — a paginated scan following `LastEvaluatedKey`, projecting only `gameId`, `playerId`, `status`, `createdAt` (aliasing the `status` reserved word via `#s` `ExpressionAttributeNames`), unmarshalling items and delegating to the pure core — and `resolve_table_name(...)` with precedence explicit arg > `GAMES_TABLE` env > CloudFormation `XraySudokuDemoStack` output > `XraySudokuDemoStack-GamesTable` prefix match. Inject the boto3 client/factories (no client at import time; `boto3` imported lazily in the CLI path). Add a `main()` with argparse (`--table-name`, `--profile`, `--json`), boundary error handling (one JSON error line, non-zero exit, no traceback), and structured single-line JSON logging to stderr configured once
+    - In `backend/tests/test_player_stats.py` (offline): table-name resolution precedence and the paginated scan exercised against hand-rolled fake clients that record the `scan` kwargs, asserting the `ProjectionExpression` and the `#s` alias; no `moto` dependency added
+    - _Requirements: 13.5, 13.7, 13.8; Design: Player Statistics Reporting (Table-name resolution; The projected, paginated scan; Boundary error handling and structured logging)_
+
+  - [x] 16.3 Add the just player-stats recipe
+    - Add a `player-stats *args` recipe to the root `Justfile` running `uv run python scripts/player_stats.py {{args}}` (mirroring `verify-trace`), with a comment noting it needs AWS credentials + network and is EXPLICITLY OUTSIDE the offline `just test` suite; pass through flags such as `--json` and `--table-name`
+    - _Requirements: 13.8; Design: Player Statistics Reporting (The get-players skill and the command surface)_
+
+  - [x] 16.4 Write the get-players skill
+    - Create `.kiro/skills/get-players/SKILL.md` describing a read-only player-statistics report driven by the `just player-stats` recipe (NOT an MCP server — there is no DynamoDB MCP server). Steps: run `just player-stats` (optionally `--json`), then report distinct players, total games, games by status, and the ESTIMATED synthetic (canary) vs organic split — clearly labelled as an estimate. Caveats section: a "player" is a browser-generated `playerId` with no auth (same person on two devices counts twice; cleared `localStorage` starts fresh); the canary's plain-UUID games can only be estimated from cadence, not cleanly separated; the scan is all-time and a full-table scan
+    - Not part of the offline pytest suite (needs AWS credentials + network)
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5; Design: Player Statistics Reporting (The get-players skill and the command surface)_
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation sub-tasks are never optional.
@@ -248,6 +314,9 @@ HTML/CSS/JS (frontend), per `design.md`.
 - The offline suite (tasks 2–12 tests) runs with no AWS credentials and no network beyond localhost; CDK synth resolves nothing from an account.
 - Property tests run a minimum of 100 iterations and each references its design property number.
 - Task 13 (end-to-end trace verification) is deliberately outside the offline suite because it depends on a live deployment and the manual Amplify handoff.
+- Task 14 adds the CloudWatch Synthetics canary and alarm: 14.1–14.3 (script asset, CDK wiring, and offline template assertions) are offline; 14.4 (live deploy + canary/trace/alarm verification) is a billable deploy-time step outside the offline suite. The canary is created only when the `canary_target_url` context is supplied, so the existing offline synth without it is unchanged.
+- Task 15 adds cost attribution: 15.1 (app-level cost-allocation tags in `backend/app.py`) and 15.2 (offline synth assertion that a taggable resource carries `Project=xray-sudoku-demo`) are offline; 15.3 (the `get-cost` skill using the Billing & Cost Management MCP `cost_explorer` tool) and 15.4 (deploy the tags + verify) are outside the offline pytest suite. Tag-based cost requires a one-time manual activation of the `Project` cost-allocation tag in the Billing console (management/payer account) plus ~24h backfill; until then the skill falls back to a service-scoped view, and the two views are complementary. This slice adds no billable infrastructure beyond negligible Cost Explorer API calls.
+- Task 16 adds player statistics: 16.1 (the pure aggregation core `compute_player_stats` / `estimate_synthetic_games`) and 16.2 (the scan I/O layer, table-name resolution, and CLI) are fully offline-tested in `backend/tests/test_player_stats.py` against hand-rolled fakes — no AWS, no network, no `moto` added; 16.3 (the `just player-stats` recipe) and 16.4 (the `get-players` skill) drive the script against a live account and are outside the offline suite (mirroring task 15's split). The synthetic/organic split is a documented estimate from the canary's ~5-minute cadence, not a measured fact, because the canary uses plain-UUID `playerId`s indistinguishable from real players; the script and skill both label it as such. The scan is read-only, projected, and all-time. This slice adds no runtime behavior and no billable infrastructure.
 
 ## Task Dependency Graph
 
@@ -267,7 +336,14 @@ HTML/CSS/JS (frontend), per `design.md`.
     { "id": 10, "tasks": ["10.4"] },
     { "id": 11, "tasks": ["10.5"] },
     { "id": 12, "tasks": ["10.6", "12.1", "12.2", "12.3"] },
-    { "id": 13, "tasks": ["13"] }
+    { "id": 13, "tasks": ["13"] },
+    { "id": 14, "tasks": ["14.1"] },
+    { "id": 15, "tasks": ["14.2"] },
+    { "id": 16, "tasks": ["14.3", "14.4"] },
+    { "id": 17, "tasks": ["15.1", "15.3"] },
+    { "id": 18, "tasks": ["15.2"] },
+    { "id": 19, "tasks": ["15.4"] },
+    { "id": 20, "tasks": ["16.1", "16.2", "16.3", "16.4"] }
   ]
 }
 ```
