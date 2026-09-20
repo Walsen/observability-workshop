@@ -82,3 +82,19 @@ deploy: build-layer
 # credential-free suite and drives a real deployment.
 verify-trace:
     uv run python scripts/verify_trace.py
+
+# Report player statistics from the DEPLOYED Games table (task 16).
+#
+# Runs a read-only, paginated, projected scan of the Games table and prints the
+# distinct-player count, total games, games-by-status, and an ESTIMATED
+# synthetic (canary) vs organic split derived from the ~5-minute canary cadence
+# (a documented heuristic, not a measured fact). The `get-players` skill drives
+# this recipe. Pass through flags, e.g. `just player-stats --json` or
+# `just player-stats --table-name <name>`.
+#
+# Requires AWS credentials and the network — like `verify-trace`, this is
+# EXPLICITLY OUTSIDE the offline `just test` suite. What is offline-tested is the
+# pure aggregation core and the scan/table-resolution plumbing, exercised with
+# fakes in backend/tests/test_player_stats.py.
+player-stats *args:
+    uv run python scripts/player_stats.py {{args}}

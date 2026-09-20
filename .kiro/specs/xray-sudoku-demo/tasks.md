@@ -286,6 +286,27 @@ HTML/CSS/JS (frontend), per `design.md`.
     - Verify the deployed resources carry the tag, e.g. `aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=xray-sudoku-demo` or by describing the deployed table's tags
     - _Requirements: 12.1, 12.2; Design: Cost Attribution and Reporting (Manual prerequisite; Testing and the offline guarantee)_
 
+- [x] 16. Player statistics: script, recipe, and skill
+
+  - [x] 16.1 Implement the pure aggregation core with tests
+    - In `scripts/player_stats.py`, implement the pure, AWS-free core: `compute_player_stats(items)` returning a frozen `PlayerStats` (`total_games`, `distinct_players`, `games_by_status`, and the synthetic/organic estimate), and `estimate_synthetic_games(items, cadence_minutes=5, tolerance_seconds=90)` — a documented cadence heuristic, not a fact. Iterate in a defined order (sort by `createdAt` then `gameId`; emit the status tally in sorted key order); rely on no set/dict ordering
+    - In `backend/tests/test_player_stats.py` (offline, no creds/network): example tests for totals, distinct players ignoring duplicate ids, the status tally, and the empty-input edge case; example tests for the cadence heuristic (a 5-minute series counted synthetic, irregular spacing organic, a mix split correctly, and the tolerance boundary); and a Hypothesis property test (≥100 examples) for `distinct_players <= total_games` and that the status tally and the synthetic/organic split each sum to `total_games`
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.6; Design: Player Statistics Reporting (Pure aggregation split from AWS I/O; The synthetic estimate heuristic; Testing and the offline guarantee)_
+
+  - [x] 16.2 Implement the scan I/O layer and table-name resolution with tests
+    - In `scripts/player_stats.py`, implement `scan_and_compute(client, table_name)` — a paginated scan following `LastEvaluatedKey`, projecting only `gameId`, `playerId`, `status`, `createdAt` (aliasing the `status` reserved word via `#s` `ExpressionAttributeNames`), unmarshalling items and delegating to the pure core — and `resolve_table_name(...)` with precedence explicit arg > `GAMES_TABLE` env > CloudFormation `XraySudokuDemoStack` output > `XraySudokuDemoStack-GamesTable` prefix match. Inject the boto3 client/factories (no client at import time; `boto3` imported lazily in the CLI path). Add a `main()` with argparse (`--table-name`, `--profile`, `--json`), boundary error handling (one JSON error line, non-zero exit, no traceback), and structured single-line JSON logging to stderr configured once
+    - In `backend/tests/test_player_stats.py` (offline): table-name resolution precedence and the paginated scan exercised against hand-rolled fake clients that record the `scan` kwargs, asserting the `ProjectionExpression` and the `#s` alias; no `moto` dependency added
+    - _Requirements: 13.5, 13.7, 13.8; Design: Player Statistics Reporting (Table-name resolution; The projected, paginated scan; Boundary error handling and structured logging)_
+
+  - [x] 16.3 Add the just player-stats recipe
+    - Add a `player-stats *args` recipe to the root `Justfile` running `uv run python scripts/player_stats.py {{args}}` (mirroring `verify-trace`), with a comment noting it needs AWS credentials + network and is EXPLICITLY OUTSIDE the offline `just test` suite; pass through flags such as `--json` and `--table-name`
+    - _Requirements: 13.8; Design: Player Statistics Reporting (The get-players skill and the command surface)_
+
+  - [x] 16.4 Write the get-players skill
+    - Create `.kiro/skills/get-players/SKILL.md` describing a read-only player-statistics report driven by the `just player-stats` recipe (NOT an MCP server — there is no DynamoDB MCP server). Steps: run `just player-stats` (optionally `--json`), then report distinct players, total games, games by status, and the ESTIMATED synthetic (canary) vs organic split — clearly labelled as an estimate. Caveats section: a "player" is a browser-generated `playerId` with no auth (same person on two devices counts twice; cleared `localStorage` starts fresh); the canary's plain-UUID games can only be estimated from cadence, not cleanly separated; the scan is all-time and a full-table scan
+    - Not part of the offline pytest suite (needs AWS credentials + network)
+    - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5; Design: Player Statistics Reporting (The get-players skill and the command surface)_
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation sub-tasks are never optional.
@@ -295,6 +316,7 @@ HTML/CSS/JS (frontend), per `design.md`.
 - Task 13 (end-to-end trace verification) is deliberately outside the offline suite because it depends on a live deployment and the manual Amplify handoff.
 - Task 14 adds the CloudWatch Synthetics canary and alarm: 14.1–14.3 (script asset, CDK wiring, and offline template assertions) are offline; 14.4 (live deploy + canary/trace/alarm verification) is a billable deploy-time step outside the offline suite. The canary is created only when the `canary_target_url` context is supplied, so the existing offline synth without it is unchanged.
 - Task 15 adds cost attribution: 15.1 (app-level cost-allocation tags in `backend/app.py`) and 15.2 (offline synth assertion that a taggable resource carries `Project=xray-sudoku-demo`) are offline; 15.3 (the `get-cost` skill using the Billing & Cost Management MCP `cost_explorer` tool) and 15.4 (deploy the tags + verify) are outside the offline pytest suite. Tag-based cost requires a one-time manual activation of the `Project` cost-allocation tag in the Billing console (management/payer account) plus ~24h backfill; until then the skill falls back to a service-scoped view, and the two views are complementary. This slice adds no billable infrastructure beyond negligible Cost Explorer API calls.
+- Task 16 adds player statistics: 16.1 (the pure aggregation core `compute_player_stats` / `estimate_synthetic_games`) and 16.2 (the scan I/O layer, table-name resolution, and CLI) are fully offline-tested in `backend/tests/test_player_stats.py` against hand-rolled fakes — no AWS, no network, no `moto` added; 16.3 (the `just player-stats` recipe) and 16.4 (the `get-players` skill) drive the script against a live account and are outside the offline suite (mirroring task 15's split). The synthetic/organic split is a documented estimate from the canary's ~5-minute cadence, not a measured fact, because the canary uses plain-UUID `playerId`s indistinguishable from real players; the script and skill both label it as such. The scan is read-only, projected, and all-time. This slice adds no runtime behavior and no billable infrastructure.
 
 ## Task Dependency Graph
 
@@ -320,7 +342,8 @@ HTML/CSS/JS (frontend), per `design.md`.
     { "id": 16, "tasks": ["14.3", "14.4"] },
     { "id": 17, "tasks": ["15.1", "15.3"] },
     { "id": 18, "tasks": ["15.2"] },
-    { "id": 19, "tasks": ["15.4"] }
+    { "id": 19, "tasks": ["15.4"] },
+    { "id": 20, "tasks": ["16.1", "16.2", "16.3", "16.4"] }
   ]
 }
 ```

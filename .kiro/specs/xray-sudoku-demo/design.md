@@ -768,3 +768,115 @@ The **skill itself is not part of `just test`**: it requires the Billing &
 Cost Management MCP server and a real account with billing data, so — like the
 end-to-end trace verification (task 13) and the live canary (task 14.4) — it is
 exercised against an account, not in the offline pytest suite.
+
+## Player Statistics Reporting
+
+This slice makes the demo's usage reportable. Like the cost reporting above it
+adds **no runtime behavior and no billable infrastructure**: it adds a
+read-only script that scans the Games_Table and a `get-players` skill that
+drives it. Where tracing shows *where time goes* and cost reporting shows *what
+the stack costs*, this shows *who is playing and how much* — distinct players,
+total games, games by status, and an estimated synthetic/organic split
+(Requirement 13).
+
+### Pure aggregation split from AWS I/O
+
+The script `scripts/player_stats.py` is deliberately split into two concerns so
+the whole of its logic that matters is offline-testable (Single Responsibility,
+dependency inversion — engineering-practices §1):
+
+- **Pure aggregation core.** `compute_player_stats(items)` takes
+  already-unmarshalled game items (plain dicts with `gameId`, `playerId`,
+  `status`, `createdAt`) and returns a frozen `PlayerStats` dataclass with
+  `total_games`, `distinct_players`, `games_by_status`, and the
+  synthetic/organic estimate. It touches no AWS and no wall clock, so every
+  count is a deterministic function of its input. Iteration order is defined
+  throughout — items are sorted by `createdAt` then `gameId`, and the status
+  tally is emitted in sorted key order — so nothing reaching the output relies
+  on set or incidental dict ordering (Requirement 13.6; engineering-practices
+  §2).
+- **AWS I/O layer.** `scan_and_compute(client, table_name)` runs the paginated,
+  projected scan and hands the unmarshalled items to the pure core;
+  `resolve_table_name(...)` discovers the table. Both take the boto3 client (or
+  client factories) as parameters, so a test injects a fake and no real client
+  is ever constructed at import time — `boto3` is imported lazily inside the CLI
+  path only (Requirement 13.5).
+
+### Table-name resolution
+
+`resolve_table_name` mirrors how `verify_trace.py` resolves the API URL, with a
+defined precedence (Requirement 13.7): an explicit `--table-name` argument, else
+the `GAMES_TABLE` environment variable, else discovery — the `XraySudokuDemoStack`
+CloudFormation `GamesTableName` output first, then a fallback of paging
+`list_tables` and matching the `XraySudokuDemoStack-GamesTable` prefix. The table
+name is never hardcoded; the two discovery clients arrive as factories so nothing
+is constructed unless discovery is actually reached.
+
+### The projected, paginated scan
+
+`scan_and_compute` reads only the four attributes it needs via a
+`ProjectionExpression`, keeping the scan cheap regardless of how large the game
+items are (they also hold board/puzzle/solution data the report never touches).
+`status` is a DynamoDB reserved word, so it is projected through the `#s`
+`ExpressionAttributeNames` alias. The scan follows `LastEvaluatedKey` to the end
+so every page is aggregated (Requirement 13.8). Only the four projected keys
+reach the pure core, so nothing sensitive is carried along even if an item has
+more attributes (engineering-practices §6).
+
+### The synthetic estimate heuristic — and its honesty caveat
+
+The Synthetics canary drives the UI every 5 minutes with plain-UUID `playerId`s
+that are indistinguishable from real players' ids, so synthetic traffic **cannot
+be cleanly excluded by id** — it can only be **estimated** from the ~5-minute
+`createdAt` cadence. `estimate_synthetic_games(items, cadence_minutes=5,
+tolerance_seconds=90)` sorts games by `createdAt` and counts those that fall on a
+regular ~cadence-spaced series: walking the games in time order, whenever the gap
+from the previous kept game is within tolerance of the cadence, both endpoints
+are treated as part of a synthetic run. Games with an unparseable timestamp and
+bursts spaced far from the cadence are left out (counted organic), and the result
+is bounded to `[0, total]` with `organic = total − synthetic`. This is a
+**documented heuristic, not a fact**: the dataclass, the prose report, and the
+`--json` output all label the split as an estimate, and the `get-players` skill
+repeats the caveat (Requirement 13.4).
+
+### Boundary error handling and structured logging
+
+The CLI catches expected failures at the boundary (engineering-practices §5): a
+`RuntimeError` from resolution/validation, an `OSError` from
+network/credential/transport, and a true top-level `except` for anything else
+(e.g. a botocore `ClientError`). Each prints one JSON error line and exits
+non-zero — never a raw traceback. Operational events go through a stdlib logger
+configured once to emit single-line JSON to **stderr** (engineering-practices
+§6), so stdout carries only the report (prose, or `--json`); it never `print()`s
+logs and never logs board/solution data.
+
+### The `get-players` skill and the command surface
+
+The report is produced through the `just player-stats` recipe (Requirement
+13.8), which runs `uv run python scripts/player_stats.py` and passes through
+flags such as `--json` and `--table-name`. The skill at
+`.kiro/skills/get-players/SKILL.md` documents the workflow and — like `get-cost`
+— states the honesty caveats plainly: a "player" is a browser-generated
+`playerId` with no auth (the same person on two devices counts twice; clearing
+`localStorage` starts fresh), the canary split is only an estimate, and the scan
+has no time window by default (all-time, full-table).
+
+### Testing and the offline guarantee
+
+The pure core and the plumbing are fully covered by the offline suite in
+`backend/tests/test_player_stats.py`, with **no AWS and no network**: example
+tests for the aggregation (totals, distinct players ignoring duplicate ids,
+status tally, empty input) and the cadence heuristic (a 5-minute series counted
+synthetic, irregular spacing counted organic, a mix split correctly, and the
+tolerance boundary); table-name resolution precedence and the paginated scan
+exercised against hand-rolled fake clients that record the `scan` kwargs (so the
+`ProjectionExpression` and the `#s` reserved-word alias are asserted); and a
+Hypothesis property test (≥100 examples) for the invariants that
+`distinct_players ≤ total_games` and that the status tally and the
+synthetic/organic split each sum to `total_games`. No `moto` dependency is added
+— fakes suffice, mirroring `test_repository.py`.
+
+The **script itself is not part of `just test`**: its scan needs AWS credentials
+and the network, so — like the end-to-end trace verification (task 13), the live
+canary (task 14.4), and the `get-cost` skill (task 15) — it is run against an
+account via `just player-stats`, not in the offline pytest suite.

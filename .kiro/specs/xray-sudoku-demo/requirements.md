@@ -33,6 +33,9 @@ The game is fully playable and supports multiple concurrent users through a clie
 - **Cost_Allocation_Tag**: An AWS resource tag that, once activated in the AWS Billing console of the management (payer) account, becomes a dimension by which AWS Cost Explorer can group and filter cost and usage.
 - **Project_Tag**: The specific Cost_Allocation_Tag with key `Project` and value `xray-sudoku-demo` applied to every taggable resource in the CDK_App, used to attribute AWS spend to the X_Ray_Sudoku_Demo.
 - **Cost_Report**: The read-only report of the X_Ray_Sudoku_Demo's AWS cost, produced by the `get-cost` skill from the AWS Cost Explorer `getCostAndUsage` operation via the AWS Billing & Cost Management MCP server.
+- **Player_Stats_Report**: The read-only report of player and usage statistics for the X_Ray_Sudoku_Demo — distinct players, total games, games by status, and an estimated synthetic/organic split — produced by the `get-players` skill from a paginated scan of the Games_Table via the `just player-stats` recipe.
+- **Distinct_Players**: The count of unique Player_Id values across all game items in the Games_Table; a proxy for the number of people playing, given that a Player_Id is a browser-generated identifier with no managed authentication behind it.
+- **Estimated_Synthetic_Games**: The estimated number of games created by the Canary rather than by real Players, inferred as a documented heuristic from the Canary's regular ~5-minute creation cadence, because the Canary uses plain-UUID Player_Id values indistinguishable from those of real Players. Its complement over the total is the Estimated_Organic_Games.
 
 ## Requirements
 
@@ -177,3 +180,18 @@ The game is fully playable and supports multiple concurrent users through a clie
 6. IF the Project_Tag is not yet active as a cost-allocation tag, THEN THE Cost_Report SHALL fall back to reporting cost grouped by AWS service (Lambda, API Gateway, DynamoDB, X-Ray, CloudWatch/Synthetics, S3, Amplify, and Data Transfer).
 7. WHERE the operator requests a month-end projection, THE Cost_Report SHALL include a forecasted cost for the current month.
 8. THE Cost_Report SHALL be read-only and SHALL introduce no billable infrastructure beyond the negligible cost of the Cost Explorer API calls it makes.
+
+### Requirement 13: Player statistics reporting
+
+**User Story:** As an operator, I want a way to report how many people are playing the demo and how many games they have played, so that I can gauge usage while staying honest about what the numbers can and cannot tell me.
+
+#### Acceptance Criteria
+
+1. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the Distinct_Players as the count of unique Player_Id values across the Games_Table.
+2. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the total number of games.
+3. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the number of games broken down by game status, and the per-status counts SHALL sum to the total number of games.
+4. WHEN the operator requests the Player_Stats_Report, THE Player_Stats_Report SHALL report the Estimated_Synthetic_Games and the Estimated_Organic_Games, and SHALL label them as an estimate derived from the Canary's ~5-minute creation cadence rather than a measured fact, and the two values SHALL sum to the total number of games.
+5. THE Player_Stats_Report SHALL be read-only, performing only a projected scan of the Games_Table and never a write.
+6. THE aggregation logic that computes the Player_Stats_Report SHALL be a pure function of already-loaded game items, separated from the AWS I/O so that it is offline-testable with no AWS credentials and no network.
+7. WHEN the operator resolves the Games_Table name, THE Player_Stats_Report SHALL take it from an explicit table-name argument if given, else the `GAMES_TABLE` environment variable, else discovery of the `XraySudokuDemoStack` stack, in that order of precedence.
+8. THE Player_Stats_Report SHALL be produced through the `just player-stats` command surface, and its scan SHALL be paginated and project only the attributes it needs (`gameId`, `playerId`, `status`, `createdAt`).
