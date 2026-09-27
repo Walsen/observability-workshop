@@ -25,23 +25,48 @@ live UI every 5 minutes with X-Ray active tracing, plus a CloudWatch alarm on th
 canary `SuccessPercent` metric. Cost-allocation tags (`Project=xray-sudoku-demo`,
 `ManagedBy=cdk`) are applied to all resources.
 
-```
-Browser / Canary
-      │  X-Amzn-Trace-Id
-      ▼
-API Gateway (REST, /prod)
-      ▼
-Lambda (Python 3.12, X-Ray active)
-      │   solver subsegments:
-      │     validate
-      │     generate
-      │     solve-backtracking
-      │     check-solution
-      ▼
-DynamoDB (Games table)
+```mermaid
+flowchart TB
+    subgraph client[Client]
+        Browser[Browser - Sudoku UI]
+        Canary[CloudWatch Synthetics Canary<br/>Puppeteer, every 5 min]
+    end
 
-        …all within a single X-Ray trace
+    Amplify[AWS Amplify Hosting<br/>no-build static site]
+
+    subgraph backend[Backend - CDK stack XraySudokuDemoStack]
+        API[API Gateway REST<br/>/prod, active tracing]
+        subgraph lambdas[Lambda - Python 3.12, X-Ray active]
+            NewGame[newGame<br/>POST /games]
+            GetGame[getGame<br/>GET /games/gameId]
+            SubmitMove[submitMove<br/>POST /games/gameId/moves]
+            Solve[solve<br/>POST /games/gameId/solve]
+        end
+        DDB[(DynamoDB<br/>Games table<br/>PK gameId, SK playerId)]
+    end
+
+    Browser -->|serves| Amplify
+    Browser -->|X-Amzn-Trace-Id| API
+    Canary -->|drives UI| Amplify
+    Canary -->|X-Amzn-Trace-Id| API
+    API --> NewGame & GetGame & SubmitMove & Solve
+    NewGame --> DDB
+    GetGame --> DDB
+    SubmitMove --> DDB
+    Solve --> DDB
+
+    subgraph obs[Observability]
+        XRay[AWS X-Ray<br/>one trace: Browser to API to Lambda to DynamoDB]
+        Subseg[Solver subsegments:<br/>validate, generate,<br/>solve-backtracking, check-solution]
+        Alarm[CloudWatch Alarm<br/>on canary SuccessPercent]
+    end
+
+    lambdas -.emit spans.-> XRay
+    lambdas -.-> Subseg
+    Canary -.SuccessPercent.-> Alarm
 ```
+
+Every request from the browser or the canary flows through API Gateway, a Lambda, and DynamoDB as a single X-Ray trace, with the solver's four named subsegments visible inside the Lambda.
 
 ### API routes
 
@@ -101,9 +126,10 @@ invoke the same code path. Run recipes inside the devbox environment.
 | `just deploy` | Build the layer, then `cdk deploy`. Emits the `API_Endpoint_URL` output. | AWS creds |
 | `just verify-trace` | Drive the live API and assert one end-to-end X-Ray trace. | AWS creds + network |
 | `just player-stats` | Report distinct players / games from DynamoDB. | AWS creds |
+| `just error-report` | Report the demo's recent X-Ray faults/errors and the canary alarm state, each with a clickable console URL. | AWS creds + network |
 
-`just verify-trace` and `just player-stats` are explicitly outside the offline
-`just test` suite.
+`just verify-trace`, `just player-stats`, and `just error-report` are explicitly
+outside the offline `just test` suite.
 
 ## Deploy / handoff
 
@@ -142,9 +168,10 @@ the Amplify console.
 │   ├── app.js
 │   └── config.js
 ├── scripts/                 # operational scripts
+│   ├── error_report.py
 │   ├── player_stats.py
 │   └── verify_trace.py
-├── .kiro/                   # specs, steering, skills, settings/mcp.json
+├── .kiro/                   # specs, steering, skills, hooks, settings/mcp.json
 ├── devbox.json
 ├── devbox.lock
 ├── .envrc
@@ -186,6 +213,17 @@ about the deployed demo:
   `cost_explorer` tool (tag-primary and service-fallback modes).
 - **get-players** — distinct players and games played, from a read-only DynamoDB
   scan via `just player-stats`.
+- **get-errors** — current X-Ray faults/failed requests and canary failures, each
+  with a clickable X-Ray console URL, scoped to the demo's own services (via the
+  CloudWatch Application Signals MCP server, with `just error-report` as a script
+  fallback).
+
+### Hooks
+
+A manually triggered agent hook lives in `.kiro/hooks/`:
+
+- **Check for errors** — runs `just error-report` on demand from the Agent Hooks
+  UI, surfacing the demo's current X-Ray faults and canary alarm state.
 
 ## Cost
 
