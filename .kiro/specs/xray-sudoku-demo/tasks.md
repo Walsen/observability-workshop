@@ -307,6 +307,31 @@ HTML/CSS/JS (frontend), per `design.md`.
     - Not part of the offline pytest suite (needs AWS credentials + network)
     - _Requirements: 13.1, 13.2, 13.3, 13.4, 13.5; Design: Player Statistics Reporting (The get-players skill and the command surface)_
 
+- [x] 17. Error reporting: skill, script, recipe, and hook
+
+  - [x] 17.1 Implement the pure formatting core with tests
+    - In `scripts/error_report.py`, implement the pure, AWS-free core: `xray_trace_console_url(trace_id, region="us-east-1")` building the CloudWatch X-Ray console deep link; `summarize_fault_traces(trace_summaries, region)` turning `GetTraceSummaries` output into a frozen `FaultTrace` list (keeping only fault/error summaries, extracting HTTP status and a best-effort root-cause message, attaching the console URL, sorted by `trace_id`); and `format_report(...)` / `report_as_dict(...)` rendering the human and `--json` forms. Iterate in a defined order; rely on no set/dict ordering
+    - In `backend/tests/test_error_report.py` (offline, no creds/network): the exact console URL for a sample id + region; `summarize_fault_traces` filtering out clean summaries, extracting status/root-cause, attaching the URL, and the empty-input edge case; `format_report` rendering faults + alarm state + window, distinguishing fault from error, reading as healthy with no errors, surfacing a firing alarm, and the `--json` keys
+    - _Requirements: 14.2, 14.3, 14.5, 14.8; Design: Error Reporting_
+
+  - [x] 17.2 Implement the X-Ray and alarm I/O layer with tests
+    - In `scripts/error_report.py`, implement `fetch_fault_trace_summaries(client, start_time, end_time, region)` — a paginated X-Ray `get_trace_summaries` following `NextToken`, applying a `fault = true OR error = true` filter expression and delegating to the pure core — and `read_canary_alarm_state(client)` reading `describe_alarms` by the `XraySudokuDemoStack-SudokuCanarySuccessAlarm` name prefix. Inject the boto3 clients (no client at import time; `boto3` imported lazily in the CLI path). Add a `main()` with argparse (`--hours`, `--region`, `--json`, `--profile`), a last-hour default window, boundary error handling (one JSON error line, non-zero exit, no traceback), and structured single-line JSON logging to stderr configured once
+    - In `backend/tests/test_error_report.py` (offline): the paginated fetch against a hand-rolled fake X-Ray client (two pages via `NextToken`) asserting all summaries aggregate, only faults are kept, and the window + filter are passed; and the alarm read against a fake CloudWatch client returning an `ALARM` state (and the no-alarm `None` case); no `moto` dependency added
+    - _Requirements: 14.1, 14.4, 14.6, 14.7, 14.9; Design: Error Reporting_
+
+  - [x] 17.3 Add the just error-report recipe
+    - Add an `error-report *args` recipe to the root `Justfile` running `uv run python scripts/error_report.py {{args}}` (mirroring `verify-trace` / `player-stats`), with a comment noting it needs AWS credentials + network and is EXPLICITLY OUTSIDE the offline `just test` suite; pass through flags such as `--hours` and `--json`
+    - _Requirements: 14.9; Design: Error Reporting (The MCP-driven skill vs the script-backed hook)_
+
+  - [x] 17.4 Write the get-errors skill
+    - Create `.kiro/skills/get-errors/SKILL.md` describing the interactive, MCP-driven report built on the `awslabs.cloudwatch-applicationsignals-mcp-server` tools (`query_sampled_traces` / `search_transaction_spans` / `audit_services` for the demo's Lambda services, `analyze_canary_failures` for `xraysudokudemosddbbe0`). Steps: pick the window (default last hour); for each error report the trace id, route, HTTP status/exception, and a clickable X-Ray console URL of the exact documented shape; distinguish fault (5xx) from the demo's intentional 400/404 client errors; report canary failures + whether the alarm is firing; a no-errors result reads as healthy. Note the `just error-report` script fallback and the sampling/intentional-4xx/no-invented-URLs caveats
+    - Not part of the offline pytest suite (needs the App Signals MCP server + a real account)
+    - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.9; Design: Error Reporting_
+
+  - [x] 17.5 Add the manual error-check hook
+    - Create `.kiro/hooks/check-errors.json` — a user-triggered ("button") hook in the versioned `.kiro/hooks/*.json` schema (`version: v1`) with a `userTriggered` trigger and a `command` action running `just error-report`. (`Manual` is not a valid trigger value in this schema; `userTriggered` is the manual/button keyword.)
+    - _Requirements: 14.10; Design: Error Reporting (The MCP-driven skill vs the script-backed hook)_
+
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP; core implementation sub-tasks are never optional.
@@ -317,6 +342,7 @@ HTML/CSS/JS (frontend), per `design.md`.
 - Task 14 adds the CloudWatch Synthetics canary and alarm: 14.1–14.3 (script asset, CDK wiring, and offline template assertions) are offline; 14.4 (live deploy + canary/trace/alarm verification) is a billable deploy-time step outside the offline suite. The canary is created only when the `canary_target_url` context is supplied, so the existing offline synth without it is unchanged.
 - Task 15 adds cost attribution: 15.1 (app-level cost-allocation tags in `backend/app.py`) and 15.2 (offline synth assertion that a taggable resource carries `Project=xray-sudoku-demo`) are offline; 15.3 (the `get-cost` skill using the Billing & Cost Management MCP `cost_explorer` tool) and 15.4 (deploy the tags + verify) are outside the offline pytest suite. Tag-based cost requires a one-time manual activation of the `Project` cost-allocation tag in the Billing console (management/payer account) plus ~24h backfill; until then the skill falls back to a service-scoped view, and the two views are complementary. This slice adds no billable infrastructure beyond negligible Cost Explorer API calls.
 - Task 16 adds player statistics: 16.1 (the pure aggregation core `compute_player_stats` / `estimate_synthetic_games`) and 16.2 (the scan I/O layer, table-name resolution, and CLI) are fully offline-tested in `backend/tests/test_player_stats.py` against hand-rolled fakes — no AWS, no network, no `moto` added; 16.3 (the `just player-stats` recipe) and 16.4 (the `get-players` skill) drive the script against a live account and are outside the offline suite (mirroring task 15's split). The synthetic/organic split is a documented estimate from the canary's ~5-minute cadence, not a measured fact, because the canary uses plain-UUID `playerId`s indistinguishable from real players; the script and skill both label it as such. The scan is read-only, projected, and all-time. This slice adds no runtime behavior and no billable infrastructure.
+- Task 17 adds error reporting: 17.1 (the pure formatting core — `xray_trace_console_url` / `summarize_fault_traces` / `format_report`) and 17.2 (the X-Ray trace-summary fetch and the canary-alarm read, the CLI, and boundary error handling) are fully offline-tested in `backend/tests/test_error_report.py` against hand-rolled fakes — no AWS, no network, no `moto` added; 17.3 (the `just error-report` recipe), 17.4 (the `get-errors` skill, MCP-driven), and 17.5 (the manual `userTriggered` hook) drive the report against a live account/MCP server and are outside the offline suite (mirroring tasks 15 and 16). The report is read-only (X-Ray trace-summary reads + a CloudWatch alarm read), scoped to the demo's Lambdas + the `xraysudokudemosddbbe0` canary (never the unrelated `process-endpoint` canary), and distinguishes 5xx faults from the demo's intentional 400/404 client errors. The manual hook uses `userTriggered` because `Manual` is not a valid trigger value in the `.kiro/hooks/*.json` schema. This slice adds no runtime behavior and no billable infrastructure.
 
 ## Task Dependency Graph
 
@@ -343,7 +369,8 @@ HTML/CSS/JS (frontend), per `design.md`.
     { "id": 17, "tasks": ["15.1", "15.3"] },
     { "id": 18, "tasks": ["15.2"] },
     { "id": 19, "tasks": ["15.4"] },
-    { "id": 20, "tasks": ["16.1", "16.2", "16.3", "16.4"] }
+    { "id": 20, "tasks": ["16.1", "16.2", "16.3", "16.4"] },
+    { "id": 21, "tasks": ["17.1", "17.2", "17.3", "17.4", "17.5"] }
   ]
 }
 ```

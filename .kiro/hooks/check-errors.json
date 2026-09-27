@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Check for errors",
+      "trigger": "userTriggered",
+      "action": { "type": "command", "command": "just error-report" }
+    }
+  ]
+}

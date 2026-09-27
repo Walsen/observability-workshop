@@ -36,6 +36,10 @@ The game is fully playable and supports multiple concurrent users through a clie
 - **Player_Stats_Report**: The read-only report of player and usage statistics for the X_Ray_Sudoku_Demo — distinct players, total games, games by status, and an estimated synthetic/organic split — produced by the `get-players` skill from a paginated scan of the Games_Table via the `just player-stats` recipe.
 - **Distinct_Players**: The count of unique Player_Id values across all game items in the Games_Table; a proxy for the number of people playing, given that a Player_Id is a browser-generated identifier with no managed authentication behind it.
 - **Estimated_Synthetic_Games**: The estimated number of games created by the Canary rather than by real Players, inferred as a documented heuristic from the Canary's regular ~5-minute creation cadence, because the Canary uses plain-UUID Player_Id values indistinguishable from those of real Players. Its complement over the total is the Estimated_Organic_Games.
+- **Fault**: A server-side failure recorded on a Trace — a 5xx response or an unhandled exception in a Lambda_Function.
+- **Error_Trace**: A Trace flagged by X-Ray as carrying a fault or an error over a time window; the demo's intentional 4xx responses (the 400 invalid-move and 404 unknown-game) surface as errors, distinct from Faults.
+- **Trace_Console_URL**: The clickable AWS CloudWatch X-Ray console deep link for a single Trace, of the shape `https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#xray:traces/{traceId}`.
+- **Error_Report**: The read-only report of the X_Ray_Sudoku_Demo's current errors — recent Error_Traces with their Trace_Console_URLs, Canary/synthetics failures, and the Canary Alarm state — produced interactively by the `get-errors` skill through the CloudWatch Application Signals MCP server, with `scripts/error_report.py` (driven by `just error-report`) as the equivalent script-backed fallback.
 
 ## Requirements
 
@@ -195,3 +199,20 @@ The game is fully playable and supports multiple concurrent users through a clie
 6. THE aggregation logic that computes the Player_Stats_Report SHALL be a pure function of already-loaded game items, separated from the AWS I/O so that it is offline-testable with no AWS credentials and no network.
 7. WHEN the operator resolves the Games_Table name, THE Player_Stats_Report SHALL take it from an explicit table-name argument if given, else the `GAMES_TABLE` environment variable, else discovery of the `XraySudokuDemoStack` stack, in that order of precedence.
 8. THE Player_Stats_Report SHALL be produced through the `just player-stats` command surface, and its scan SHALL be paginated and project only the attributes it needs (`gameId`, `playerId`, `status`, `createdAt`).
+
+### Requirement 14: Error reporting and alerting visibility
+
+**User Story:** As an operator, I want a way to report the errors currently affecting the demo — X-Ray faults and failed requests with links to their traces, canary failures, and whether the canary alarm is firing — so that I can see what is broken at a glance while telling real failures apart from the demo's intentional client errors.
+
+#### Acceptance Criteria
+
+1. WHEN the operator requests the Error_Report without specifying a time window, THE Error_Report SHALL cover the last one hour, and WHERE the operator specifies a window, THE Error_Report SHALL cover the specified window.
+2. WHEN the Error_Report reports X-Ray failures, THE Error_Report SHALL include, for each Error_Trace in the window, the trace identifier, the HTTP status or exception, and a clickable Trace_Console_URL.
+3. THE Error_Report SHALL distinguish a Fault (a 5xx or unhandled exception) from an error (a 4xx), and SHALL identify the demo's intentional invalid-move (400) and unknown-game (404) responses as expected client errors rather than failures.
+4. WHEN the Error_Report reports synthetics health, THE Error_Report SHALL report any Canary failures and SHALL surface the current state of the Canary Alarm (`OK`, `ALARM`, or `INSUFFICIENT_DATA`).
+5. IF there are no Error_Traces in the window, THEN THE Error_Report SHALL report the demo as healthy rather than as an error.
+6. THE Error_Report SHALL be scoped to the X_Ray_Sudoku_Demo's own footprint — the demo's Lambda_Functions and the `xraysudokudemosddbbe0` Canary — and SHALL NOT report the unrelated `process-endpoint` Canary.
+7. THE Error_Report SHALL be read-only, performing only X-Ray trace-summary reads and a CloudWatch alarm-state read, and SHALL NOT write any AWS state.
+8. THE formatting logic that builds the Error_Report — the Trace_Console_URL construction, the fault/error summarization, and the report rendering — SHALL be a pure function of already-loaded inputs, separated from the AWS I/O so that it is offline-testable with no AWS credentials and no network.
+9. THE Error_Report SHALL be available two ways: interactively through the `get-errors` skill driven by the CloudWatch Application Signals MCP server, and as a script-backed fallback produced through the `just error-report` command surface, whose X-Ray trace-summary scan SHALL be paginated.
+10. THE X_Ray_Sudoku_Demo SHALL expose a manually triggered Hook that runs the Error_Report on demand.

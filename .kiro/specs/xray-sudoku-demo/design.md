@@ -880,3 +880,117 @@ The **script itself is not part of `just test`**: its scan needs AWS credentials
 and the network, so — like the end-to-end trace verification (task 13), the live
 canary (task 14.4), and the `get-cost` skill (task 15) — it is run against an
 account via `just player-stats`, not in the offline pytest suite.
+
+## Error Reporting
+
+This slice makes the demo's current errors reportable at a glance. Like the cost
+and player-statistics reporting above it adds **no runtime behavior and no
+billable infrastructure**: it adds a read-only script, a `get-errors` skill that
+drives the CloudWatch Application Signals MCP server, and a manually triggered
+hook. Where tracing shows *where time goes*, cost shows *what the stack costs*,
+and player statistics show *who is playing*, this shows *what is broken right
+now* — recent X-Ray faults/errors with links to their traces, canary failures,
+and whether the canary alarm is firing (Requirement 14).
+
+### Pure formatting split from AWS I/O
+
+The script `scripts/error_report.py` is split into two concerns so the whole of
+its logic that matters is offline-testable (Single Responsibility, dependency
+inversion — engineering-practices §1), exactly as `player_stats.py` is:
+
+- **Pure formatting/parsing core.** `xray_trace_console_url(trace_id, region)`
+  builds the console deep link; `summarize_fault_traces(trace_summaries, region)`
+  turns raw `GetTraceSummaries` output into a frozen `FaultTrace` list — keeping
+  only summaries flagged `HasFault`/`HasError`, extracting the HTTP status and a
+  best-effort root-cause message, and attaching each trace's console URL;
+  `format_report(...)` / `report_as_dict(...)` render the human and `--json`
+  forms. None of these touch AWS or the wall clock. Iteration order is defined —
+  faults are sorted by `trace_id` — so nothing reaching the output relies on set
+  or incidental dict ordering (Requirement 14.8; engineering-practices §2). The
+  demo scope (Requirement 14.6) is enforced client-side here by matching each
+  trace's X-Ray `ServiceIds` against the demo's service names — the
+  `XraySudokuDemoStack` substring plus the exact names `SudokuApi/prod` and the
+  canary `xraysudokudemosddbbe0` — because X-Ray's `FilterExpression` cannot
+  substring-match service names server-side.
+- **AWS I/O layer.** `fetch_fault_trace_summaries(client, start, end, region)`
+  runs the paginated X-Ray `get_trace_summaries` and delegates to the pure core;
+  `read_canary_alarm_state(client)` reads the alarm. Both take the boto3 client
+  as a parameter, so a test injects a fake and no real client is constructed at
+  import time — `boto3` is imported lazily inside the CLI path only
+  (Requirement 14.7, 14.8).
+
+### The MCP-driven skill vs the script-backed hook
+
+There are two ways to produce the report (Requirement 14.9), and they are
+complementary — mirroring how `get-cost` documents its Billing MCP path:
+
+- **Interactive (MCP-driven).** The `get-errors` skill at
+  `.kiro/skills/get-errors/SKILL.md` is the primary path. It uses the
+  `awslabs.cloudwatch-applicationsignals-mcp-server` tools — `query_sampled_traces`
+  / `search_transaction_spans` / `audit_services` for the demo's Lambda services,
+  and `analyze_canary_failures` for the `xraysudokudemosddbbe0` canary — to find
+  faults/errors in the window and diagnose canary failures, reporting each with a
+  clickable console URL.
+- **Script-backed (fallback + hook).** `scripts/error_report.py`, driven by
+  `just error-report`, produces the same data without the MCP server: a paginated
+  X-Ray trace-summary scan plus a CloudWatch alarm read. The manually triggered
+  hook at `.kiro/hooks/check-errors.json` runs this recipe on demand — a
+  user-clicked button, using the versioned `.kiro/hooks/*.json` schema's
+  `userTriggered` trigger (the manual/button keyword; there is no `Manual`
+  trigger value in this schema), with a `command` action running `just
+  error-report` (Requirement 14.10).
+
+### Trace console URL construction
+
+`xray_trace_console_url` builds the exact CloudWatch X-Ray console deep link
+`https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}#xray:traces/{traceId}`.
+It is pure string construction, asserted precisely by an offline test, and both
+the script and the skill build a URL only for a trace id a tool actually
+returned — never an invented one.
+
+### Scope, window, and fault-vs-error
+
+The report is scoped to the demo's own footprint (Requirement 14.6): X-Ray
+faults/errors on the four Sudoku Lambdas behind the API, and the canary's
+`SudokuCanarySuccessAlarm` read by name prefix so the unrelated `process-endpoint`
+canary's alarms are never picked up. The window defaults to the last hour and is
+overridable via `--hours`. The X-Ray scan applies a `fault = true OR error =
+true` filter expression so the account's healthy traffic is excluded
+server-side. Crucially the report distinguishes a **fault** (5xx / unhandled
+exception — a real failure) from an **error** (4xx): the demo's intentional
+invalid-move `400` and unknown-game `404` responses surface as errors and are
+labelled expected client errors, not failures (Requirement 14.3). The no-faults
+case reads plainly as healthy, not as an error (Requirement 14.5).
+
+### Boundary error handling and structured logging
+
+The CLI catches expected failures at the boundary (engineering-practices §5): an
+`OSError` from network/credential/transport, and a true top-level `except` for
+anything else (a botocore `ClientError` / `EndpointConnectionError` /
+`NoCredentialsError`). Each prints one JSON error line and exits non-zero — never
+a raw traceback. Operational events go through a stdlib logger configured once to
+emit single-line JSON to **stderr** (engineering-practices §6), so stdout carries
+only the report (prose, or `--json`); it never `print()`s logs and never logs
+anything sensitive.
+
+### Testing and the offline guarantee
+
+The pure core and the plumbing are fully covered by the offline suite in
+`backend/tests/test_error_report.py`, with **no AWS and no network**: the exact
+console URL for a sample trace id and region; `summarize_fault_traces` filtering
+out clean summaries, extracting the HTTP status and a root-cause message,
+attaching the console URL, and the empty-input edge case; `format_report`
+rendering faults + alarm state + window, distinguishing fault from error, reading
+as healthy with no errors, and surfacing a firing alarm, plus the `--json`
+structure's keys; the X-Ray I/O layer against a hand-rolled fake returning a
+**paginated** `get_trace_summaries` (two pages via `NextToken`), asserting all
+summaries aggregate and only faults are kept and that the time window and filter
+are passed; and the alarm read against a fake CloudWatch client returning an
+`ALARM` state. No `moto` dependency is added — fakes suffice, mirroring
+`test_player_stats.py`.
+
+The **script itself is not part of `just test`**: its X-Ray and CloudWatch reads
+need AWS credentials and the network, so — like the end-to-end trace
+verification (task 13), the live canary (task 14.4), the `get-cost` skill
+(task 15), and the `get-players` script (task 16) — it is run against an account
+via `just error-report`, not in the offline pytest suite.

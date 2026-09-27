@@ -98,3 +98,21 @@ verify-trace:
 # fakes in backend/tests/test_player_stats.py.
 player-stats *args:
     uv run python scripts/player_stats.py {{args}}
+
+# Report the demo's recent X-Ray errors and canary alarm state (task 17).
+#
+# Runs a read-only, paginated X-Ray `get_trace_summaries` over a window (default
+# the last hour) scoped to faults/errors, plus a CloudWatch `describe_alarms`
+# read of the canary's SudokuCanarySuccessAlarm, and prints each fault trace with
+# a clickable X-Ray console URL — distinguishing 5xx faults from the demo's
+# intentional 400/404 client errors. The `get-errors` skill drives this recipe as
+# its script fallback. Pass through flags, e.g. `just error-report --hours 6` or
+# `just error-report --json`.
+#
+# Requires AWS credentials and the network — like `verify-trace` and
+# `player-stats`, this is EXPLICITLY OUTSIDE the offline `just test` suite. What
+# is offline-tested is the pure formatting/URL/parsing core and the
+# summaries/alarm plumbing, exercised with fakes in
+# backend/tests/test_error_report.py.
+error-report *args:
+    uv run python scripts/error_report.py {{args}}
