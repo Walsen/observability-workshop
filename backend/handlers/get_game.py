@@ -191,9 +191,18 @@ def _load_game(game_id: str, player_id: str, deps: Dependencies) -> ProxyRespons
         },
     )
 
-    # Return the gameId, the current board, and the status. The solution is
-    # intentionally omitted — handing it to the player defeats the game.
-    return ok({"gameId": game.game_id, "board": game.board, "status": game.status})
+    # Return the gameId, the current board, the status, and the stored
+    # difficulty (a legacy item without one deserializes as medium, so a concrete
+    # value is always present). The solution is intentionally omitted — handing
+    # it to the player defeats the game.
+    return ok(
+        {
+            "gameId": game.game_id,
+            "board": game.board,
+            "status": game.status,
+            "difficulty": game.difficulty,
+        }
+    )
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> ProxyResponse:

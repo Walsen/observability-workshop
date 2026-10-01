@@ -24,6 +24,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.domain.board import SIZE, Board
+from backend.domain.difficulty import (
+    DEFAULT_DIFFICULTY,
+    VALID_DIFFICULTY_LEVELS,
+    Difficulty,
+)
 
 # A game is either being played or finished; these are the only two states the
 # design's ``status`` attribute admits.
@@ -46,6 +51,7 @@ class Game:
     puzzle: Board
     solution: Board
     status: Status
+    difficulty: Difficulty
     created_at: str
     updated_at: str
 
@@ -112,6 +118,7 @@ def game_to_item(game: Game) -> dict[str, str]:
         "puzzle": board_to_json(game.puzzle),
         "solution": board_to_json(game.solution),
         "status": game.status,
+        "difficulty": game.difficulty,
         "createdAt": game.created_at,
         "updatedAt": game.updated_at,
     }
@@ -123,7 +130,11 @@ def game_from_item(item: dict[str, Any]) -> Game:
     The inverse of :func:`game_to_item`. Parses each stored board with
     :func:`board_from_json`, so a malformed board string raises
     :class:`ValueError`. The status is read through :func:`_validate_status`,
-    which rejects any value outside the two allowed states.
+    which rejects any value outside the two allowed states. The difficulty is
+    read through :func:`_validate_difficulty`, which **defaults a missing value
+    to** :data:`DEFAULT_DIFFICULTY` — this is the whole of the backward-compatible
+    read: a legacy item written before this feature has no ``difficulty`` key and
+    reads back as ``medium`` with no migration (Requirements 7.3, 7.4).
     """
     return Game(
         game_id=str(item["gameId"]),
@@ -132,6 +143,7 @@ def game_from_item(item: dict[str, Any]) -> Game:
         puzzle=board_from_json(item["puzzle"]),
         solution=board_from_json(item["solution"]),
         status=_validate_status(item["status"]),
+        difficulty=_validate_difficulty(item.get("difficulty")),
         created_at=str(item["createdAt"]),
         updated_at=str(item["updatedAt"]),
     )
@@ -142,3 +154,21 @@ def _validate_status(value: Any) -> Status:
     if value == "in_progress" or value == "solved":
         return value
     raise ValueError(f"status must be 'in_progress' or 'solved', got {value!r}")
+
+
+def _validate_difficulty(value: Any) -> Difficulty:
+    """Return ``value`` as a :data:`Difficulty`, defaulting a missing one to medium.
+
+    An absent (``None``) difficulty — a legacy item that predates this feature —
+    reads back as :data:`DEFAULT_DIFFICULTY` with no migration (Requirements 7.3,
+    7.4). A present value must name a registered level; any other value raises
+    :class:`ValueError`, consistent with how :func:`_validate_status` guards the
+    status.
+    """
+    if value is None:
+        return DEFAULT_DIFFICULTY
+    if value in VALID_DIFFICULTY_LEVELS:
+        return value
+    raise ValueError(
+        f"difficulty must be one of {VALID_DIFFICULTY_LEVELS}, got {value!r}"
+    )

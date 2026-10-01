@@ -42,6 +42,7 @@ def _game(game_id: str = "game-123", player_id: str = "player-abc") -> Game:
         puzzle=[row[:] for row in _PUZZLE],
         solution=[row[:] for row in _SOLUTION],
         status="in_progress",
+        difficulty="medium",
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:05:00+00:00",
     )
@@ -183,6 +184,7 @@ def test_second_save_for_same_pair_overwrites_the_item_in_place() -> None:
         puzzle=first.puzzle,
         solution=first.solution,
         status="solved",
+        difficulty="medium",
         created_at=first.created_at,
         updated_at="2024-01-01T00:10:00+00:00",
     )

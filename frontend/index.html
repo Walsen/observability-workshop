@@ -21,6 +21,20 @@
       board. They are disabled until the API is configured (see app.js).
     -->
     <div class="controls" role="group" aria-label="Game controls">
+      <!--
+        Difficulty selector. Three fixed options — easy, medium, hard — with
+        medium preselected. The value chosen here travels in the New Game request
+        body (see app.js). A labelled <select> is keyboard- and screen-reader
+        usable out of the box.
+      -->
+      <label class="controls__field" for="difficulty">
+        <span class="controls__label">Difficulty</span>
+        <select id="difficulty" class="controls__select">
+          <option value="easy">Easy</option>
+          <option value="medium" selected>Medium</option>
+          <option value="hard">Hard</option>
+        </select>
+      </label>
       <button type="button" id="new-game-btn" class="controls__btn">New Game</button>
       <button type="button" id="solve-btn" class="controls__btn" disabled>Solve</button>
     </div>
@@ -48,6 +62,7 @@
     </section>
 
     <footer class="app__footer">
+      <p id="game-difficulty" class="app__game-difficulty" aria-live="polite"></p>
       <p id="game-id" class="app__game-id" aria-live="polite"></p>
     </footer>
   </main>

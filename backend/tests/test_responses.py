@@ -94,6 +94,23 @@ def test_bad_request_carries_cors_headers() -> None:
     _assert_cors_headers(responses.bad_request("playerId"))
 
 
+def test_bad_request_lists_valid_values_when_given() -> None:
+    # A difficulty 400 advertises the accepted values so the player learns them
+    # (Requirement 6.3). bad_request carries them under ``validValues``.
+    response = responses.bad_request(
+        "difficulty", "bad difficulty", valid_values=["easy", "medium", "hard"]
+    )
+    body = _body(response)
+    assert body["field"] == "difficulty"
+    assert body["validValues"] == ["easy", "medium", "hard"]
+    _assert_cors_headers(response)
+
+
+def test_bad_request_omits_valid_values_key_when_not_given() -> None:
+    body = _body(responses.bad_request("playerId"))
+    assert "validValues" not in body
+
+
 # --- not_found ---------------------------------------------------------------
 
 

@@ -60,6 +60,35 @@ body {
   margin-bottom: 1rem;
 }
 
+.controls {
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+/* Difficulty field: a stacked label + <select>, sitting alongside the buttons. */
+.controls__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+.controls__select {
+  font-size: 1rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0.5rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.controls__select:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
 .controls__btn {
   font-size: 1rem;
   padding: 0.55rem 1.1rem;
@@ -167,6 +196,13 @@ body {
 
 .app__footer {
   margin-top: 1rem;
+}
+
+.app__game-difficulty {
+  margin: 0 0 0.25rem;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .app__game-id {

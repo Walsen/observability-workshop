@@ -98,6 +98,7 @@ def _games(draw: st.DrawFn) -> Game:
         puzzle=puzzle,
         solution=solution,
         status=draw(_statuses),
+        difficulty="medium",
         created_at=draw(_timestamps),
         updated_at=draw(_timestamps),
     )

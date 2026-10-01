@@ -102,6 +102,7 @@ def _stored_game(puzzle: Board, solution: Board) -> Game:
         puzzle=[row[:] for row in puzzle],
         solution=[row[:] for row in solution],
         status="in_progress",
+        difficulty="medium",
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -123,7 +124,7 @@ def test_property_valid_move_changes_only_its_target_cell(
     seed: int, cell_choice: int
 ) -> None:
     solver = Solver(FakeTracer())
-    generated = solver.generate(random.Random(seed))
+    generated = solver.generate(random.Random(seed), 40)
     puzzle = generated.puzzle
     solution = generated.solution
 

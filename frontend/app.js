@@ -279,8 +279,24 @@ function apiFetch(path, options) {
 function newGame() {
   return apiFetch('/games', {
     method: 'POST',
-    body: { playerId: getPlayerId() },
+    body: { playerId: getPlayerId(), difficulty: getSelectedDifficulty() },
   });
+}
+
+/**
+ * Read the difficulty the player selected from the <select>, defaulting to
+ * 'medium' when the control is absent. Because the control is a fixed
+ * three-option select, the returned value is always one of the valid names,
+ * so the request body carries a value from the valid set (Requirement 1.4).
+ *
+ * @returns {string} one of 'easy' | 'medium' | 'hard'.
+ */
+function getSelectedDifficulty() {
+  var select = els.difficulty || document.getElementById('difficulty');
+  if (select && select.value) {
+    return select.value;
+  }
+  return 'medium';
 }
 
 /**
@@ -337,6 +353,8 @@ var els = {
   newGameBtn: null,
   solveBtn: null,
   gameId: null,
+  difficulty: null,
+  gameDifficulty: null,
 };
 
 // ── Message area helpers ──────────────────────────────────────────────────────
@@ -526,6 +544,7 @@ function handleNewGame() {
       adoptGame(response.data.gameId, response.data.board, computeGivens(response.data.board));
       state.solved = false;
       renderBoard();
+      showGameDifficulty(response.data.difficulty);
       showMessage('New game started. Fill the empty cells.', 'info');
     })
     .catch(handleRequestError)
@@ -646,6 +665,26 @@ function adoptGame(gameId, board, givens) {
   }
 }
 
+/**
+ * Display the current game's difficulty, as returned by the server, so the
+ * player can see which difficulty they are playing (Requirement 1.5). The value
+ * shown is the server-returned difficulty, so it reflects what was actually
+ * stored (including 'medium' for a legacy game that had none).
+ *
+ * @param {string} [difficulty] one of 'easy' | 'medium' | 'hard'.
+ */
+function showGameDifficulty(difficulty) {
+  if (!els.gameDifficulty) {
+    return;
+  }
+  if (!difficulty) {
+    els.gameDifficulty.textContent = '';
+    return;
+  }
+  var label = difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
+  els.gameDifficulty.textContent = 'Difficulty: ' + label;
+}
+
 /** Persist the current game id in localStorage (best-effort). */
 function persistGameId(gameId) {
   try {
@@ -705,6 +744,8 @@ function init() {
   els.newGameBtn = document.getElementById('new-game-btn');
   els.solveBtn = document.getElementById('solve-btn');
   els.gameId = document.getElementById('game-id');
+  els.difficulty = document.getElementById('difficulty');
+  els.gameDifficulty = document.getElementById('game-difficulty');
 
   if (els.newGameBtn) {
     els.newGameBtn.addEventListener('click', handleNewGame);
@@ -741,6 +782,7 @@ function resumeStoredGame(gameId) {
         adoptGame(gameId, response.data.board, computeGivens(response.data.board));
         state.solved = false;
         renderBoard();
+        showGameDifficulty(response.data.difficulty);
         showMessage('Resumed your game.', 'info');
       } else {
         showMessage('Press "New Game" to start.', 'info');
@@ -770,3 +812,5 @@ window.newGame = newGame;
 window.getGame = getGame;
 window.submitMove = submitMove;
 window.solve = solve;
+window.getSelectedDifficulty = getSelectedDifficulty;
+window.showGameDifficulty = showGameDifficulty;
