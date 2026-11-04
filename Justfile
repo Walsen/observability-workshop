@@ -116,3 +116,25 @@ player-stats *args:
 # backend/tests/test_error_report.py.
 error-report *args:
     uv run python scripts/error_report.py {{args}}
+
+# In-browser UI smoke test against the DEPLOYED Amplify frontend (fresh
+# screenshot included). Drives real headless Chromium through New Game -> Solve
+# and asserts the board renders 81 cells and completes.
+#
+# Why a Node script and not the `playwright` MCP server or Playwright's own
+# auto-launch: this environment's Chromium comes from the Nix
+# `playwright-driver.browsers` bundle (gc-rooted at
+# `.devbox-gcroots/playwright-browsers`), an aarch64 build whose layout and
+# revision do not match what playwright-core auto-discovers — so auto-launch
+# fails with "Executable doesn't exist" even though a working browser is right
+# there. scripts/e2e_smoke.mjs resolves that binary out of the gc-root and
+# passes it as `executablePath`, bypassing discovery. node comes from the
+# aws-cdk-cli closure (same init_hook wiring as `synth`); playwright-core is a
+# git-ignored npm install under scripts/, pinned here.
+#
+# Requires AWS/network reachability to the deployed stack — EXPLICITLY OUTSIDE
+# the offline `just test` suite, same boundary as `verify-trace`. Override the
+# target with `just e2e --url https://...` or UI_URL=... just e2e.
+e2e *args:
+    cd scripts && npm install --no-save --no-audit --no-fund playwright-core@1.56.0
+    node scripts/e2e_smoke.mjs {{args}}

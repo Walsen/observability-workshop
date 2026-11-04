@@ -162,3 +162,19 @@ cdk.out/
 # CDK deploy outputs file (`cdk deploy --outputs-file`). A generated artifact of
 # a live deploy that captures the ApiEndpointUrl; never committed.
 cdk-deploy-outputs.json
+
+# Nix gcroot pinning the Playwright browsers bundle (chromium 1243) that the
+# `playwright` MCP server uses via PLAYWRIGHT_BROWSERS_PATH. A machine-local
+# symlink into the Nix store; regenerated with:
+#   nix build --out-link .devbox-gcroots/playwright-browsers nixpkgs#playwright-driver.browsers
+# Never committed.
+.devbox-gcroots/
+
+# Node tooling for the in-browser e2e smoke test (`just e2e`). The frontend is a
+# no-build static site with no toolchain, so this is NOT a frontend build step —
+# it is a test-only dependency (playwright-core) that `just e2e` installs beside
+# scripts/e2e_smoke.mjs. node comes from the aws-cdk-cli closure; the browser
+# itself is the gc-rooted Nix bundle, not an npm download. Never committed.
+scripts/node_modules/
+scripts/package.json
+scripts/package-lock.json
