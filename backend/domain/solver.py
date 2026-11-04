@@ -32,12 +32,6 @@ from backend.domain.board import (
 )
 from backend.domain.tracing import Tracer
 
-# How many cells generation blanks out of the 81. Bounding removals keeps each
-# generate cheap enough for a 100+ iteration property test while leaving a
-# comfortable ~40 givens; every accepted removal is still uniqueness-checked, so
-# the puzzle keeps exactly one solution regardless of this value.
-_TARGET_REMOVALS = 40
-
 
 @dataclass(frozen=True)
 class GeneratedPuzzle:
@@ -116,23 +110,31 @@ class Solver:
                 return False
             return is_valid_placement(board, move.row, move.col, move.value)
 
-    def generate(self, rng: random.Random) -> GeneratedPuzzle:
+    def generate(self, rng: random.Random, removal_count: int) -> GeneratedPuzzle:
         """Return a puzzle with a unique solution, driven entirely by ``rng``.
 
         First fills an empty board into a complete, valid solution, trying digits
         in an ``rng``-shuffled order so different seeds yield different solutions.
-        Then removes cells one at a time — in an ``rng``-shuffled cell order —
-        keeping a removal only while the remaining givens still admit exactly one
-        completion. The result therefore has exactly one solution, and because all
-        randomness comes from ``rng`` alone, an equally seeded generator reproduces
-        the same puzzle and solution.
+        Then removes up to ``removal_count`` cells one at a time — in an
+        ``rng``-shuffled cell order — keeping a removal only while the remaining
+        givens still admit exactly one completion. The result therefore has
+        exactly one solution regardless of ``removal_count``, and because all
+        randomness comes from ``rng`` alone, an equally seeded generator and the
+        same ``removal_count`` reproduce the same puzzle and solution.
 
-        The ``generate`` subsegment is opened once around the whole operation; the
-        fill, uniqueness count, and cell removal are pure helpers with no tracing.
+        ``removal_count`` is the per-level carving target the caller resolves from
+        the difficulty registry and passes in — the Solver takes only this ``int``
+        and the ``rng``, never the registry or the request, keeping the generation
+        seam narrow (Interface Segregation). A larger count yields fewer givens (a
+        harder puzzle); a smaller count yields more givens (an easier puzzle).
+
+        The ``generate`` subsegment is opened once around the whole operation,
+        regardless of ``removal_count``; the fill, uniqueness count, and cell
+        removal are pure helpers with no tracing.
         """
         with self._tracer.subsegment("generate"):
             solution = self._full_solution(rng)
-            puzzle = self._carve_unique_puzzle(solution, rng)
+            puzzle = self._carve_unique_puzzle(solution, rng, removal_count)
             return GeneratedPuzzle(puzzle=puzzle, solution=solution)
 
     @staticmethod
@@ -212,24 +214,28 @@ class Solver:
                 board[row][col] = 0
         return False
 
-    def _carve_unique_puzzle(self, solution: Board, rng: random.Random) -> Board:
+    def _carve_unique_puzzle(
+        self, solution: Board, rng: random.Random, removal_count: int
+    ) -> Board:
         """Blank cells of ``solution`` in ``rng`` order while uniqueness holds.
 
         Considers cells in an ``rng``-shuffled order, tentatively clearing each and
         keeping the clear only while the remaining board still has exactly one
         completion (a cleared cell that admits a second completion is restored).
-        Carving stops once ``_TARGET_REMOVALS`` cells have been blanked, which
-        bounds the work per call so a 100+ iteration property test stays fast; the
-        result still has exactly one solution because every accepted removal was
-        uniqueness-checked. The defined shuffle order makes carving reproducible
-        for a given seed.
+        Carving stops once ``removal_count`` cells have been blanked — the
+        per-level target the caller passed in — which bounds the work per call so
+        a 100+ iteration property test stays fast; the result still has exactly one
+        solution because every accepted removal was uniqueness-checked, so a larger
+        ``removal_count`` never compromises the single-solution guarantee. The
+        defined shuffle order makes carving reproducible for a given seed and
+        ``removal_count``.
         """
         puzzle = [row[:] for row in solution]
         cells = [(row, col) for row in range(SIZE) for col in range(SIZE)]
         rng.shuffle(cells)
         removed = 0
         for row, col in cells:
-            if removed >= _TARGET_REMOVALS:
+            if removed >= removal_count:
                 break
             value = puzzle[row][col]
             puzzle[row][col] = 0

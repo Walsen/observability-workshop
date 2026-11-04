@@ -25,6 +25,13 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from backend.data.game import Game
+from backend.domain.difficulty import (
+    DEFAULT_DIFFICULTY,
+    VALID_DIFFICULTY_LEVELS,
+    Difficulty,
+    is_valid_difficulty,
+    resolve,
+)
 from backend.handlers.bootstrap import (
     Dependencies,
     build_runtime_dependencies,
@@ -35,6 +42,7 @@ from backend.handlers.responses import ProxyResponse, bad_request, ok, server_er
 
 _ENDPOINT = "new_game"
 _PLAYER_ID_FIELD = "playerId"
+_DIFFICULTY_FIELD = "difficulty"
 
 logger = get_logger(__name__)
 
@@ -68,19 +76,28 @@ def handle(event: dict[str, Any], deps: Dependencies) -> ProxyResponse:
     response, success or error, carries CORS headers via the ``responses`` helpers.
     """
     try:
-        player_id = _parse_player_id(event)
+        player_id, difficulty = _parse_body(event)
     except _ValidationError as exc:
         # Malformed input is a recoverable, expected failure: log at WARNING and
-        # return a 400 naming the field. Never a 500, never a stack trace.
+        # return a 400 naming the field. Never a 500, never a stack trace. A
+        # difficulty rejection also advertises the accepted set so the player
+        # learns the valid values (Requirement 6.3).
         logger.warning(
             "new game rejected: %s",
             exc.message,
-            extra={"endpoint": _ENDPOINT, "traceId": current_trace_id()},
+            extra={
+                "endpoint": _ENDPOINT,
+                "field": exc.field,
+                "traceId": current_trace_id(),
+            },
         )
-        return bad_request(_PLAYER_ID_FIELD, exc.message)
+        valid_values = (
+            list(VALID_DIFFICULTY_LEVELS) if exc.field == _DIFFICULTY_FIELD else None
+        )
+        return bad_request(exc.field, exc.message, valid_values=valid_values)
 
     try:
-        return _create_game(player_id, deps)
+        return _create_game(player_id, difficulty, deps)
     except ClientError:
         # The one expected failure past validation is a DynamoDB write error.
         # Log with the stack trace server-side; return a generic 500 to the client.
@@ -95,14 +112,22 @@ def handle(event: dict[str, Any], deps: Dependencies) -> ProxyResponse:
         return server_error()
 
 
-def _parse_player_id(event: dict[str, Any]) -> str:
-    """Extract a non-empty string ``playerId`` from the proxy event body.
+def _parse_body(event: dict[str, Any]) -> tuple[str, Difficulty]:
+    """Extract ``(playerId, difficulty)`` from the proxy event body.
 
     The API Gateway proxy event carries the request body as a JSON *string* in
-    ``event["body"]``. This parses it and pulls out ``playerId``, raising
-    :class:`_ValidationError` (which the caller maps to a 400) when the body is
-    missing, is not valid JSON, is not a JSON object, or lacks a non-empty string
-    ``playerId``. Whitespace-only ids are rejected; the id is returned stripped.
+    ``event["body"]``. This parses it and pulls out a non-empty string
+    ``playerId`` and an optional ``difficulty``, raising :class:`_ValidationError`
+    (which the caller maps to a 400) when the body is missing, is not valid JSON,
+    is not a JSON object, lacks a non-empty string ``playerId``, or carries a
+    ``difficulty`` that is present but is not a string or not a registered level.
+
+    Difficulty is read **only** from the JSON body: a difficulty supplied as a
+    query-string or path parameter is not consulted here, so it is treated as
+    absent and the default applies (Requirement 6.5). An absent ``difficulty``
+    defaults to :data:`DEFAULT_DIFFICULTY` with no error (Requirement 7.1); a
+    present but invalid one is a 400 naming ``difficulty`` (Requirements 6.1,
+    6.2). Whitespace-only ids are rejected; the id is returned stripped.
     """
     raw_body = event.get("body")
     if raw_body is None:
@@ -125,20 +150,50 @@ def _parse_player_id(event: dict[str, Any]) -> str:
         raise _ValidationError(
             _PLAYER_ID_FIELD, "playerId must be a non-empty string."
         )
-    return player_id.strip()
+
+    difficulty = _parse_difficulty(parsed)
+    return player_id.strip(), difficulty
 
 
-def _create_game(player_id: str, deps: Dependencies) -> ProxyResponse:
-    """Generate, persist, and return a new game for ``player_id``.
+def _parse_difficulty(body: dict[str, Any]) -> Difficulty:
+    """Return the body's ``difficulty`` as a registered level, or the default.
 
-    Generates a unique-solution puzzle with the injected rng and solver (the
-    ``generate`` subsegment opens here), assigns the gameId from the injected id
-    source and a single timestamp from the injected clock (``created_at`` equals
-    ``updated_at`` at creation), stores the game scoped to ``(gameId, playerId)``,
-    logs the creation at INFO, and returns a ``201`` carrying the gameId, the
-    initial board, and the status — but not the solution.
+    An absent ``difficulty`` key defaults to :data:`DEFAULT_DIFFICULTY` with no
+    error (Requirement 7.1). A present ``difficulty`` must be a string naming a
+    registered level; a non-string (Requirement 6.2) or an unknown name
+    (Requirement 6.1) raises :class:`_ValidationError` naming the ``difficulty``
+    field, which the boundary maps to a 400 listing the valid set — never a 500.
     """
-    generated = deps.solver.generate(deps.new_rng())
+    if _DIFFICULTY_FIELD not in body:
+        return DEFAULT_DIFFICULTY
+
+    raw = body[_DIFFICULTY_FIELD]
+    if not is_valid_difficulty(raw):
+        raise _ValidationError(
+            _DIFFICULTY_FIELD,
+            "difficulty must be one of: " + ", ".join(VALID_DIFFICULTY_LEVELS) + ".",
+        )
+    # is_valid_difficulty guarantees ``raw`` is one of the registered names.
+    return raw  # type: ignore[return-value]
+
+
+def _create_game(
+    player_id: str, difficulty: Difficulty, deps: Dependencies
+) -> ProxyResponse:
+    """Generate, persist, and return a new game for ``player_id`` at ``difficulty``.
+
+    Resolves the difficulty strategy from the registry and generates a
+    unique-solution puzzle with the injected rng and solver using that level's
+    removal count (the ``generate`` subsegment opens here, once regardless of the
+    count), assigns the gameId from the injected id source and a single timestamp
+    from the injected clock (``created_at`` equals ``updated_at`` at creation),
+    stores the game — carrying the chosen ``difficulty`` — scoped to
+    ``(gameId, playerId)``, logs the creation at INFO with the difficulty, and
+    returns a ``201`` carrying the gameId, the initial board, the status, and the
+    difficulty — but not the solution.
+    """
+    strategy = resolve(difficulty)
+    generated = deps.solver.generate(deps.new_rng(), strategy.removal_count)
     game_id = deps.id_source()
     created_at = deps.clock()
 
@@ -149,6 +204,7 @@ def _create_game(player_id: str, deps: Dependencies) -> ProxyResponse:
         puzzle=generated.puzzle,
         solution=generated.solution,
         status="in_progress",
+        difficulty=difficulty,
         created_at=created_at,
         updated_at=created_at,
     )
@@ -159,15 +215,22 @@ def _create_game(player_id: str, deps: Dependencies) -> ProxyResponse:
         extra={
             "gameId": game_id,
             _PLAYER_ID_FIELD: player_id,
+            _DIFFICULTY_FIELD: difficulty,
             "endpoint": _ENDPOINT,
             "traceId": current_trace_id(),
         },
     )
 
-    # Return the gameId, the initial board (the givens), and the status. The
-    # solution is intentionally omitted — handing it to the player defeats the game.
+    # Return the gameId, the initial board (the givens), the status, and the
+    # chosen difficulty. The solution is intentionally omitted — handing it to
+    # the player defeats the game.
     return ok(
-        {"gameId": game_id, "board": game.board, "status": game.status},
+        {
+            "gameId": game_id,
+            "board": game.board,
+            "status": game.status,
+            "difficulty": game.difficulty,
+        },
         status=201,
     )
 

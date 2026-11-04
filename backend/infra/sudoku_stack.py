@@ -44,6 +44,12 @@ _ASSET_ROOT = Path(__file__).resolve().parent.parent.parent
 _ASSET_EXCLUDE = [
     ".venv",
     ".devbox",
+    # Machine-local Nix gcroot symlinking the large Playwright browsers bundle
+    # (git-ignored, see .gitignore). Like .devbox/.venv it is non-source dev
+    # cruft; excluding it keeps the staged asset lean and, critically, keeps
+    # ``from_asset`` from copying a multi-hundred-MB browser tree into the synth
+    # tmp dir — which otherwise exhausts a small tmpfs and breaks offline synth.
+    ".devbox-gcroots",
     "cdk.out",
     ".git",
     "__pycache__",
@@ -54,6 +60,8 @@ _ASSET_EXCLUDE = [
     ".ruff_cache",
     "frontend",
     ".kiro",
+    # Workflow run artifacts (coder/review/integrate records); not Lambda source.
+    ".agents",
 ]
 
 # Context key an operator can set (``cdk synth -c allowed_origin=...`` or in

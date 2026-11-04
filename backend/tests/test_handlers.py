@@ -85,7 +85,7 @@ class CannedSolver:
     def __init__(self, tracer: FakeTracer) -> None:
         self._tracer = tracer
 
-    def generate(self, rng: Any) -> GeneratedPuzzle:
+    def generate(self, rng: Any, removal_count: int) -> GeneratedPuzzle:
         with self._tracer.subsegment("generate"):
             return GeneratedPuzzle(
                 puzzle=[row[:] for row in _PUZZLE],
@@ -291,6 +291,7 @@ def _stored_game(
     game_id: str = "game-1",
     player_id: str = "player-abc",
     status: str = "in_progress",
+    difficulty: str = "medium",
 ) -> Game:
     """Build a Game to seed InMemoryGames with, for get_game load tests."""
     return Game(
@@ -300,6 +301,7 @@ def _stored_game(
         puzzle=[row[:] for row in _PUZZLE],
         solution=[row[:] for row in _SOLUTION],
         status=status,  # type: ignore[arg-type]
+        difficulty=difficulty,  # type: ignore[arg-type]
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
     )
@@ -567,6 +569,7 @@ def _one_from_complete_game(
         puzzle=board,
         solution=[r[:] for r in _SOLUTION],
         status="in_progress",
+        difficulty="medium",
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
     )
@@ -1015,6 +1018,7 @@ def _contradictory_game(
         puzzle=[row[:] for row in _PUZZLE],
         solution=[row[:] for row in _SOLUTION],
         status="in_progress",
+        difficulty="medium",
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
     )

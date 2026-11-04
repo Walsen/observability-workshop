@@ -18,6 +18,11 @@ from backend.domain.board import Board, Move, is_complete_and_valid, is_valid_pl
 from backend.domain.solver import GeneratedPuzzle, Solver
 from backend.domain.tracing import FakeTracer
 
+# A concrete removal count for the example generate tests. The Solver takes an
+# explicit per-level count (resolved from the difficulty registry by the
+# handler); these example tests use the medium level's count of 40.
+_REMOVALS = 40
+
 # A known-good, fully solved 9x9 board (every row, column, and box holds 1..9).
 _SOLVED: Board = [
     [5, 3, 4, 6, 7, 8, 9, 1, 2],
@@ -142,7 +147,7 @@ def test_solver_example_check_solution_opens_check_solution_subsegment() -> None
 def test_solver_example_generate_returns_a_complete_valid_solution() -> None:
     solver, _ = _new_solver()
 
-    result = solver.generate(random.Random(1234))
+    result = solver.generate(random.Random(1234), _REMOVALS)
 
     assert isinstance(result, GeneratedPuzzle)
     assert is_complete_and_valid(result.solution)
@@ -151,7 +156,7 @@ def test_solver_example_generate_returns_a_complete_valid_solution() -> None:
 def test_solver_example_generate_puzzle_givens_agree_with_solution() -> None:
     solver, _ = _new_solver()
 
-    result = solver.generate(random.Random(1234))
+    result = solver.generate(random.Random(1234), _REMOVALS)
 
     # Every given cell of the puzzle matches the solution; empty cells are 0.
     assert _agrees_with_givens(result.solution, result.puzzle)
@@ -160,7 +165,7 @@ def test_solver_example_generate_puzzle_givens_agree_with_solution() -> None:
 def test_solver_example_generate_puzzle_has_empty_cells_but_solution_full() -> None:
     solver, _ = _new_solver()
 
-    result = solver.generate(random.Random(1234))
+    result = solver.generate(random.Random(1234), _REMOVALS)
 
     givens = sum(1 for row in result.puzzle for cell in row if cell != 0)
     assert 0 < givens < 81  # some cells are blanked; it is not a full board
@@ -170,8 +175,8 @@ def test_solver_example_generate_puzzle_has_empty_cells_but_solution_full() -> N
 def test_solver_example_generate_is_reproducible_from_equal_seeds() -> None:
     solver, _ = _new_solver()
 
-    first = solver.generate(random.Random(2024))
-    second = solver.generate(random.Random(2024))
+    first = solver.generate(random.Random(2024), _REMOVALS)
+    second = solver.generate(random.Random(2024), _REMOVALS)
 
     assert first.puzzle == second.puzzle
     assert first.solution == second.solution
@@ -180,7 +185,7 @@ def test_solver_example_generate_is_reproducible_from_equal_seeds() -> None:
 def test_solver_example_generate_opens_generate_subsegment() -> None:
     solver, tracer = _new_solver()
 
-    solver.generate(random.Random(1))
+    solver.generate(random.Random(1), _REMOVALS)
 
     assert "generate" in tracer.entered
 
@@ -245,7 +250,7 @@ def test_solver_opens_the_four_named_subsegments() -> None:
     # runs the operation on a fresh solver bound to the given tracer.
     operations: list[tuple[str, Callable[[Solver], object]]] = [
         ("validate", lambda solver: solver.validate_move(_copy(_PUZZLE), Move(0, 2, 4))),
-        ("generate", lambda solver: solver.generate(random.Random(7))),
+        ("generate", lambda solver: solver.generate(random.Random(7), _REMOVALS)),
         ("solve-backtracking", lambda solver: solver.solve(_copy(_PUZZLE))),
         ("check-solution", lambda solver: solver.check_solution(_SOLVED)),
     ]

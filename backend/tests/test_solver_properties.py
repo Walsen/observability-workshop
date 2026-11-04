@@ -24,6 +24,12 @@ from backend.domain.board import (
 from backend.domain.solver import Solver
 from backend.domain.tracing import FakeTracer
 
+# The removal count these pre-existing generation properties carve with. The
+# Solver now takes an explicit per-level count; these tests use the medium
+# level's count of 40, which is the pre-feature fixed value, so they continue to
+# assert exactly what they asserted before difficulty was added.
+_REMOVALS = 40
+
 # Upper bound, in seconds, on a single ``solve`` call inside a property example.
 # ``solve`` on a valid or a densely contradictory board returns near-instantly;
 # this cap only ever trips on inputs the solver cannot resolve in bounded time,
@@ -81,7 +87,7 @@ def _agrees_with_givens(solution: Board, givens: Board) -> bool:
 @settings(max_examples=100, deadline=None)
 def test_property_backtracking_returns_valid_consistent_completion(seed: int) -> None:
     solver = _new_solver()
-    generated = solver.generate(random.Random(seed))
+    generated = solver.generate(random.Random(seed), _REMOVALS)
 
     result = solver.solve(generated.puzzle)
 
@@ -256,7 +262,7 @@ def _first_empty_cell(board: Board) -> tuple[int, int] | None:
 @settings(max_examples=100, deadline=None)
 def test_property_generated_puzzle_has_unique_solution(seed: int) -> None:
     solver = _new_solver()
-    generated = solver.generate(random.Random(seed))
+    generated = solver.generate(random.Random(seed), _REMOVALS)
 
     # Counting completions independently (capped at 2) must find exactly one...
     assert _count_completions(generated.puzzle, limit=2) == 1
@@ -280,8 +286,8 @@ def test_property_generation_is_reproducible_from_seed(seed: int) -> None:
     # Two independent solvers, each with its own tracer, so a pass proves the
     # output depends only on the injected rng, not on any per-solver or
     # module-level state carried between calls.
-    first = _new_solver().generate(random.Random(seed))
-    second = _new_solver().generate(random.Random(seed))
+    first = _new_solver().generate(random.Random(seed), _REMOVALS)
+    second = _new_solver().generate(random.Random(seed), _REMOVALS)
 
     # The same seed must reproduce the same puzzle: identical givens...
     assert first.puzzle == second.puzzle
@@ -296,7 +302,7 @@ def test_different_seeds_produce_different_puzzles() -> None:
     principle, so "different seed differs" is asserted only for two seeds known
     to differ, not as an invariant over all inputs.
     """
-    from_seed_1 = _new_solver().generate(random.Random(1))
-    from_seed_2 = _new_solver().generate(random.Random(2))
+    from_seed_1 = _new_solver().generate(random.Random(1), _REMOVALS)
+    from_seed_2 = _new_solver().generate(random.Random(2), _REMOVALS)
 
     assert from_seed_1.puzzle != from_seed_2.puzzle

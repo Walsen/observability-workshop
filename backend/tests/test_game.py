@@ -52,6 +52,7 @@ def _game() -> Game:
         puzzle=[row[:] for row in _PUZZLE],
         solution=[row[:] for row in _SOLUTION],
         status="in_progress",
+        difficulty="medium",
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:05:00+00:00",
     )
@@ -153,6 +154,7 @@ def test_game_to_item_uses_dynamodb_attribute_names() -> None:
         "puzzle",
         "solution",
         "status",
+        "difficulty",
         "createdAt",
         "updatedAt",
     }
@@ -185,5 +187,34 @@ def test_game_round_trips_through_the_item_dict() -> None:
 def test_game_from_item_rejects_malformed_board_json() -> None:
     item = game_to_item(_game())
     item["board"] = "not json"
+    with pytest.raises(ValueError):
+        game_from_item(item)
+
+
+# --- difficulty (de)serialization and backward compatibility -----------------
+
+
+def test_game_to_item_stores_the_difficulty_attribute() -> None:
+    item = game_to_item(_game())
+    assert item["difficulty"] == "medium"
+
+
+def test_game_from_item_reads_a_stored_difficulty() -> None:
+    item = game_to_item(_game())
+    item["difficulty"] = "hard"
+    assert game_from_item(item).difficulty == "hard"
+
+
+def test_game_from_item_defaults_a_missing_difficulty_to_medium() -> None:
+    # A legacy item that predates the feature has no difficulty key; it must
+    # read back as medium with no migration (Requirements 7.3, 7.4).
+    item = game_to_item(_game())
+    del item["difficulty"]
+    assert game_from_item(item).difficulty == "medium"
+
+
+def test_game_from_item_rejects_an_invalid_stored_difficulty() -> None:
+    item = game_to_item(_game())
+    item["difficulty"] = "expert"
     with pytest.raises(ValueError):
         game_from_item(item)

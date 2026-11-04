@@ -79,15 +79,26 @@ def ok(payload: Any, status: int = 200) -> ProxyResponse:
     return _json_response(status, payload)
 
 
-def bad_request(field: str, message: str | None = None) -> ProxyResponse:
+def bad_request(
+    field: str,
+    message: str | None = None,
+    *,
+    valid_values: list[str] | None = None,
+) -> ProxyResponse:
     """A 400 whose body names the offending ``field`` (Requirements 3.3, 4.3).
 
     ``message`` supplies human-readable detail; absent one, a generic message
-    referencing the field is used. Malformed input is mapped here — never to a
-    500 — so the browser always receives a readable, CORS-bearing 400.
+    referencing the field is used. ``valid_values``, when given, lists the
+    accepted values for the field under a ``validValues`` body key — the
+    difficulty 400 uses it so the body advertises the valid difficulty names
+    (Requirement 6.3). Malformed input is mapped here — never to a 500 — so the
+    browser always receives a readable, CORS-bearing 400.
     """
     error = message if message is not None else f"Invalid or missing field: {field}"
-    return _json_response(400, {"error": error, "field": field})
+    body: dict[str, Any] = {"error": error, "field": field}
+    if valid_values is not None:
+        body["validValues"] = valid_values
+    return _json_response(400, body)
 
 
 def not_found() -> ProxyResponse:
