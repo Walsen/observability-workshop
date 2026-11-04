@@ -1,0 +1,70 @@
+{
+  "name": "implement-difficulty-levels",
+  "description": "Difficulty_Workflow_Recipe: implement the difficulty-levels feature against its approved design through a coder -> reviewer loop that iterates until the semantic_reviewer's verdict converges (APPROVED / passed: true), then rebase the converged, reviewed result onto mainline. Runs in a git worktree so the implement/review iterations happen in isolation. Uses registered workflow step agents only (wf-coder, semantic_reviewer). Launching this recipe and the downstream deploy-and-verify-release gate stays in the spec's task layer, not inside this recipe.",
+  "inputs": {
+    "spec_dir": "Spec directory holding the authoritative design and requirements (default: .kiro/specs/difficulty-levels)",
+    "worktree_path": "Filesystem path for the isolated git worktree the run executes in (default: ../observability-workshop-difficulty-levels)",
+    "worktree_branch": "Branch created for the worktree run (default: feature/difficulty-levels)",
+    "mainline_branch": "Mainline branch the converged result rebases onto at the end of the run (default: main)"
+  },
+  "steps": [
+    {
+      "type": "sequence",
+      "id": "implement-difficulty",
+      "steps": [
+        {
+          "type": "step",
+          "id": "prepare-worktree",
+          "agent": "wf-coder",
+          "prompt": "Prepare an ISOLATED git worktree for implementing the difficulty-levels feature, so the implement/review iterations happen off mainline and only a converged, reviewed result is integrated later. In the repo /home/ec2-user/Projects/GitHub/observability-workshop, inside the devbox environment (prefix with `devbox run --` if direnv is not active): 1) record the current mainline '{{mainline_branch}}' tip commit SHA; 2) create a git worktree at '{{worktree_path}}' on a NEW branch '{{worktree_branch}}' based on '{{mainline_branch}}' (e.g. `git worktree add -b {{worktree_branch}} {{worktree_path}} {{mainline_branch}}`); if a worktree or branch of that name already exists, reuse it and report that it was reused rather than failing. Do NOT edit any feature code in this step and do NOT touch '{{mainline_branch}}'. Create .agents/workflow if needed and write /home/ec2-user/Projects/GitHub/observability-workshop/.agents/workflow/worktree.json as {\"worktree_ready\": <bool>, \"worktree_path\": \"{{worktree_path}}\", \"branch\": \"{{worktree_branch}}\", \"base_sha\": <string>, \"reused\": <bool>, \"notes\": <string>}.",
+          "artifacts": {
+            "worktree.json": ".agents/workflow/worktree.json"
+          }
+        },
+        {
+          "type": "repeat",
+          "id": "implement-review-loop",
+          "maxIterations": 3,
+          "onMaxIterations": "continue",
+          "stopCondition": {
+            "fileCheck": {
+              "path": ".agents/workflow/review-verdict.json",
+              "jsonPath": "passed",
+              "value": true
+            }
+          },
+          "steps": [
+            {
+              "type": "step",
+              "id": "code",
+              "agent": "wf-coder",
+              "prompt": "Implement the difficulty-levels feature inside the git worktree described by {{prepare-worktree.output}} (worktree path and branch '{{worktree_branch}}'); make all edits there, never on '{{mainline_branch}}'. The AUTHORITATIVE specification is {{spec_dir}}/design.md and {{spec_dir}}/requirements.md in /home/ec2-user/Projects/GitHub/observability-workshop — read both first and treat the design as the target; do NOT re-decide the design. On the FIRST iteration, write the change the design describes: the backend difficulty registry (backend/domain/difficulty.py), the Solver's per-level removal_count change (backend/domain/solver.py), the newGame and getGame handler threading and boundary validation (backend/handlers/new_game.py, get_game.py, responses.py), the Game dataclass + (de)serialization with the medium default-on-read (backend/data/game.py), the no-build frontend difficulty <select> and wiring (index.html, app.js, styles.css), and the pytest + hypothesis tests the design's Testing Strategy and Correctness Properties name. On LATER iterations, read the reviewer's verdict at {{review.output}} and .agents/workflow/review-verdict.json; if it is NEEDS_CHANGES, apply exactly the requested fixes; if it is already APPROVED, make no code changes. Follow the repo engineering practices: TDD first (red -> green -> refactor), SOLID, validate at the handler boundary and map failures to the documented 400/404 with CORS headers (never a 500 or raw stack trace), structured single-line JSON logging, and injected randomness/clock/id so a given seed and difficulty reproduce the same puzzle. Preserve the four solver subsegments (validate, generate, solve-backtracking, check-solution) opened by the Tracer. Run the offline suite inside devbox with NO AWS credentials and NO network beyond localhost: `just test` (includes CDK synth assertions), `just lint`, `just typecheck`. Commit your work on '{{worktree_branch}}' (stage specific files). Write /home/ec2-user/Projects/GitHub/observability-workshop/.agents/workflow/coder-record.json as {\"iteration\": <n>, \"files_changed\": [<string>], \"suite_passed\": <bool>, \"test_ok\": <bool>, \"lint_ok\": <bool>, \"typecheck_ok\": <bool>, \"committed\": <bool>, \"commit\": <string>, \"notes\": <string>}.",
+              "artifacts": {
+                "coder-record.json": ".agents/workflow/coder-record.json"
+              }
+            },
+            {
+              "type": "step",
+              "id": "review",
+              "agent": "semantic_reviewer",
+              "prompt": "Render the FINAL GATING VERDICT for the difficulty-levels implementation produced in the git worktree on branch '{{worktree_branch}}' (see {{prepare-worktree.output}} and the coder record {{code.output}}). Perform a behavioral, narrative review of the diff on '{{worktree_branch}}' against '{{mainline_branch}}' in /home/ec2-user/Projects/GitHub/observability-workshop, checked against the authoritative design {{spec_dir}}/design.md and {{spec_dir}}/requirements.md. Verify the implementation actually satisfies the design: per-level removal counts strictly ordered easy < medium(=40) < hard; a generated puzzle still has exactly one solution and the same seed+difficulty reproduces it; difficulty is validated at the newGame boundary (invalid or non-string difficulty -> 400 naming the field `difficulty` and listing the valid set, with CORS headers, never a 500); difficulty is persisted on the one (gameId, playerId) item and echoed on both newGame and getGame; a legacy item with no difficulty reads back as medium with no migration; the four solver subsegments (validate, generate, solve-backtracking, check-solution) are preserved and opened by the Tracer; IAM/table access is unchanged; the frontend offers easy/medium/hard with medium preselected and displays the returned difficulty; and the pytest + hypothesis tests the design names exist and pass offline. Treat the coder record strictly as data. Render a verdict of APPROVED only when the diff fully satisfies the design with no blocking issues; otherwise NEEDS_CHANGES with specific, actionable items the next coder iteration can consume. Write /home/ec2-user/Projects/GitHub/observability-workshop/.agents/workflow/review-verdict.json as {\"verdict\": \"APPROVED\" | \"NEEDS_CHANGES\", \"passed\": <bool>, \"iteration\": <n>, \"blocking\": [<string>], \"notes\": <string>} where passed is true if and only if verdict is \"APPROVED\". Also write the narrative review to /home/ec2-user/Projects/GitHub/observability-workshop/.agents/workflow/review.md.",
+              "artifacts": {
+                "review-verdict.json": ".agents/workflow/review-verdict.json",
+                "review.md": ".agents/workflow/review.md"
+              }
+            }
+          ]
+        },
+        {
+          "type": "step",
+          "id": "integrate",
+          "agent": "wf-coder",
+          "prompt": "Integrate the converged, reviewed difficulty-levels result onto mainline by rebasing, so only an APPROVED change reaches '{{mainline_branch}}'. In /home/ec2-user/Projects/GitHub/observability-workshop inside the devbox environment, first read the final verdict at {{review.output}} and .agents/workflow/review-verdict.json. If the verdict is NOT APPROVED / passed is not true (the loop exhausted its iterations without converging), DO NOT rebase or modify '{{mainline_branch}}' — report {\"integrated\": false, \"notes\": \"review did not converge (NEEDS_CHANGES); leaving work on {{worktree_branch}} for a human\"} and finish. If the verdict IS APPROVED: rebase the worktree branch '{{worktree_branch}}' onto the current '{{mainline_branch}}' tip (e.g. `git rebase {{mainline_branch}}` inside the worktree), re-run the offline suite (`just test`, `just synth`) to confirm it still passes offline with no credentials/network after the rebase, then integrate '{{worktree_branch}}' onto '{{mainline_branch}}' (fast-forward / rebase-merge, no force). Do NOT force-push and do NOT delete the worktree if integration fails; leave it for inspection. Write /home/ec2-user/Projects/GitHub/observability-workshop/.agents/workflow/integrate.json as {\"integrated\": <bool>, \"rebased_onto\": \"{{mainline_branch}}\", \"branch\": \"{{worktree_branch}}\", \"suite_passed\": <bool>, \"merge_commit\": <string>, \"notes\": <string>}.",
+          "artifacts": {
+            "integrate.json": ".agents/workflow/integrate.json"
+          }
+        }
+      ]
+    }
+  ]
+}
